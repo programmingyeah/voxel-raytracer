@@ -1,0 +1,1 @@
+glslc shader.comp -o comp.spv
