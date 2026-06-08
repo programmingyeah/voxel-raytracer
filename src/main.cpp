@@ -2,7 +2,6 @@
 #include "world/world_gen.hpp"
 #include <chrono>
 #include <iostream>
-#include <stdexcept>
 
 GLFWwindow* window = nullptr;
 VulkanApp renderer;
@@ -25,7 +24,7 @@ void gameLoop(Camera& camera) {
 
 int main() {
     try {
-        VoxelWorld world(glm::uvec3(5, 3, 5));
+        VoxelWorld world(glm::uvec3(10, 3, 10));
         WorldGenerator worldGenerator;
         worldGenerator.generateTerrain(world);
 

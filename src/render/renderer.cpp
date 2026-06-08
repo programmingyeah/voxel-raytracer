@@ -11,8 +11,23 @@ struct ComputePushConstants {
     glm::vec4 cameraRight;
     glm::vec4 cameraUp;
     glm::ivec4 worldDimensions;
+    glm::ivec4 chunkCounts;
     glm::vec4 renderParams;
 };
+
+void uploadStorageBuffer(Instance& instance, Buffer& buffer, const std::vector<uint32_t>& data)
+{
+    const VkDeviceSize bufferSize = sizeof(uint32_t) * static_cast<VkDeviceSize>(data.empty() ? 1 : data.size());
+    buffer.createBuffer(
+        &instance,
+        bufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+
+    const uint32_t zero = 0;
+    buffer.upload(&instance, data.empty() ? static_cast<const void*>(&zero) : static_cast<const void*>(data.data()), bufferSize);
+}
 
 void insertImageBarrier(
     VkCommandBuffer commandBuffer,
@@ -88,25 +103,32 @@ void VulkanApp::initVulkan() {
     storageImageBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     storageImageBinding.pImmutableSamplers = nullptr;
 
-    VkDescriptorSetLayoutBinding voxelBufferBinding{};
-    voxelBufferBinding.binding = 1;
-    voxelBufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    voxelBufferBinding.descriptorCount = 1;
-    voxelBufferBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    voxelBufferBinding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutBinding chunkBrickMapBinding{};
+    chunkBrickMapBinding.binding = 1;
+    chunkBrickMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    chunkBrickMapBinding.descriptorCount = 1;
+    chunkBrickMapBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    chunkBrickMapBinding.pImmutableSamplers = nullptr;
 
-    descriptorManager.initLayout(&instance, {storageImageBinding, voxelBufferBinding});
+    VkDescriptorSetLayoutBinding brickPoolBinding{};
+    brickPoolBinding.binding = 2;
+    brickPoolBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    brickPoolBinding.descriptorCount = 1;
+    brickPoolBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    brickPoolBinding.pImmutableSamplers = nullptr;
+
+    descriptorManager.initLayout(&instance, {storageImageBinding, chunkBrickMapBinding, brickPoolBinding});
     descriptorManager.initPool(
         &instance,
         {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_FRAMES_IN_FLIGHT},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_FRAMES_IN_FLIGHT}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * MAX_FRAMES_IN_FLIGHT}
         },
         MAX_FRAMES_IN_FLIGHT
     );
 
     createComputeImages();
-    createVoxelBuffer();
+    createWorldBuffers();
     createDescriptorSets(true);
     createComputePipeline();
     commandPool.allocateCommandBuffers(&instance, MAX_FRAMES_IN_FLIGHT);
@@ -193,26 +215,20 @@ void VulkanApp::createComputeImages() {
     }
 }
 
-void VulkanApp::createVoxelBuffer() {
+void VulkanApp::createWorldBuffers() {
     if (world == nullptr) {
-        throw std::runtime_error("voxel world must be set before creating the voxel buffer");
+        throw std::runtime_error("voxel world must be set before creating world buffers");
     }
 
-    const std::vector<uint32_t> voxels = world->buildVoxelBuffer();
-    const VkDeviceSize voxelBufferSize = sizeof(uint32_t) * voxels.size();
-
-    voxelBuffer.createBuffer(
-        &instance,
-        voxelBufferSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-    voxelBuffer.upload(&instance, voxels.data(), voxelBufferSize);
+    const GpuVoxelBuffers gpuBuffers = world->buildGpuBuffers();
+    uploadStorageBuffer(instance, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
+    uploadStorageBuffer(instance, brickPoolBuffer, gpuBuffers.brickData);
 }
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
     std::vector<VkDescriptorImageInfo> imageInfos(MAX_FRAMES_IN_FLIGHT);
-    std::vector<VkDescriptorBufferInfo> bufferInfos(MAX_FRAMES_IN_FLIGHT);
+    std::vector<VkDescriptorBufferInfo> chunkBrickMapInfos(MAX_FRAMES_IN_FLIGHT);
+    std::vector<VkDescriptorBufferInfo> brickPoolInfos(MAX_FRAMES_IN_FLIGHT);
     std::vector<std::vector<DescriptorWrite>> descriptorWrites(MAX_FRAMES_IN_FLIGHT);
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -227,14 +243,25 @@ void VulkanApp::createDescriptorSets(bool allocateSets) {
             &imageInfos[i]
         });
 
-        bufferInfos[i].buffer = voxelBuffer.buffer;
-        bufferInfos[i].offset = 0;
-        bufferInfos[i].range = voxelBuffer.size;
+        chunkBrickMapInfos[i].buffer = chunkBrickMapBuffer.buffer;
+        chunkBrickMapInfos[i].offset = 0;
+        chunkBrickMapInfos[i].range = chunkBrickMapBuffer.size;
 
         descriptorWrites[i].push_back({
             1,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            &bufferInfos[i],
+            &chunkBrickMapInfos[i],
+            nullptr
+        });
+
+        brickPoolInfos[i].buffer = brickPoolBuffer.buffer;
+        brickPoolInfos[i].offset = 0;
+        brickPoolInfos[i].range = brickPoolBuffer.size;
+
+        descriptorWrites[i].push_back({
+            2,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            &brickPoolInfos[i],
             nullptr
         });
     }
@@ -260,7 +287,8 @@ void VulkanApp::cleanup() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
 
-    voxelBuffer.cleanup(&instance);
+    chunkBrickMapBuffer.cleanup(&instance);
+    brickPoolBuffer.cleanup(&instance);
     descriptorManager.cleanup(&instance);
     syncManager.cleanup(&instance);
     commandPool.cleanup(&instance);
@@ -368,6 +396,7 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
     const glm::uvec3 worldDimensions = world->getVoxelDimensions();
+    const glm::uvec3 chunkCounts = world->getChunkCounts();
     ComputePushConstants pushConstants{};
     pushConstants.cameraPos = glm::vec4(camera.getPosition(), 1.0f);
     pushConstants.cameraForward = glm::vec4(camera.getForward(), 0.0f);
@@ -377,6 +406,12 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         static_cast<int>(worldDimensions.x),
         static_cast<int>(worldDimensions.y),
         static_cast<int>(worldDimensions.z),
+        0
+    );
+    pushConstants.chunkCounts = glm::ivec4(
+        static_cast<int>(chunkCounts.x),
+        static_cast<int>(chunkCounts.y),
+        static_cast<int>(chunkCounts.z),
         0
     );
     pushConstants.renderParams = glm::vec4(0.1f, static_cast<float>(glm::length(glm::vec3(worldDimensions))) * 2.0f, 1.4f, 0.0f);

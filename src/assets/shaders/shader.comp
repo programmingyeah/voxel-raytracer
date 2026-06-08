@@ -3,9 +3,13 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(binding = 0, rgba8) uniform writeonly image2D destImage;
 
-layout(std430, binding = 1) readonly buffer Voxels {
+layout(std430, binding = 1) readonly buffer ChunkBrickMaps {
     uint data[];
-} voxels;
+} chunkBrickMaps;
+
+layout(std430, binding = 2) readonly buffer BrickPool {
+    uint data[];
+} brickPool;
 
 layout(push_constant) uniform PushConstants {
     vec4 cameraPos;
@@ -13,150 +17,345 @@ layout(push_constant) uniform PushConstants {
     vec4 cameraRight;
     vec4 cameraUp;
     ivec4 worldDimensions;
+    ivec4 chunkCounts;
     vec4 renderParams;
 } pc;
 
-bool inBounds(ivec3 p) {
+const float BIG = 1e30;
+const float EPS = 1e-4;
+const int CHUNK_SIZE = 64;
+const int BRICK_SIZE = 8;
+const int BRICKS_PER_AXIS = CHUNK_SIZE / BRICK_SIZE;
+const int BRICK_COUNT = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
+const int PACKED_BRICK_WORD_COUNT = (BRICK_SIZE * BRICK_SIZE * BRICK_SIZE) / 4;
+const uint AIR_MATERIAL = 0u;
+const uint FULL_STONE_MATERIAL = 1u;
+const uint MATERIAL_COUNT = 2u;
+
+vec3 backgroundColor(vec3 rd) {
+    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+    return mix(vec3(0.75, 0.80, 0.90), vec3(0.35, 0.55, 0.90), t);
+}
+
+vec3 addSun(vec3 color, vec3 rd, vec3 lightDir) {
+    float sunAmount = max(dot(rd, lightDir), 0.0);
+    float glow = pow(sunAmount, 128.0);
+    float disc = pow(sunAmount, 2048.0);
+    vec3 sunColor = vec3(1.0, 0.95, 0.80);
+    return color + sunColor * (0.25 * glow + 3.0 * disc);
+}
+
+float hash13(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 191.9))) * 43758.5453123);
+}
+
+vec3 stoneColor(ivec3 voxelPos) {
+    float noise = hash13(vec3(voxelPos));
+    float shade = 0.45 + 0.18 * noise;
+    return vec3(shade);
+}
+
+vec3 applyGamma(vec3 color) {
+    return pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+}
+
+bool inWorldBounds(ivec3 p) {
     return p.x >= 0 && p.y >= 0 && p.z >= 0 &&
            p.x < pc.worldDimensions.x &&
            p.y < pc.worldDimensions.y &&
            p.z < pc.worldDimensions.z;
 }
 
-int voxelIndex(ivec3 p) {
-    return p.x +
-        pc.worldDimensions.x *
-        (p.y + pc.worldDimensions.y * p.z);
+bool inChunkBounds(ivec3 chunkCoord) {
+    return chunkCoord.x >= 0 && chunkCoord.y >= 0 && chunkCoord.z >= 0 &&
+           chunkCoord.x < pc.chunkCounts.x &&
+           chunkCoord.y < pc.chunkCounts.y &&
+           chunkCoord.z < pc.chunkCounts.z;
 }
 
-bool isSolid(ivec3 p) {
-    return inBounds(p) &&
-        voxels.data[voxelIndex(p)] != 0u;
+int chunkIndex(ivec3 chunkCoord) {
+    return chunkCoord.x + pc.chunkCounts.x * (chunkCoord.y + pc.chunkCounts.y * chunkCoord.z);
 }
 
-vec3 backgroundColor(vec3 rd) {
-    float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 horizon = vec3(0.18, 0.22, 0.28);
-    vec3 zenith = vec3(0.34, 0.48, 0.72);
-    vec3 ground = vec3(0.03, 0.035, 0.045);
-    vec3 sky = mix(horizon, zenith, t * t);
-    return mix(ground, sky, smoothstep(-0.08, 0.2, rd.y));
+int brickIndex(ivec3 brickCoord) {
+    return brickCoord.x + BRICKS_PER_AXIS * (brickCoord.y + BRICKS_PER_AXIS * brickCoord.z);
 }
 
-vec3 addSun(vec3 color, vec3 rd, vec3 lightDir) {
-    float sunAmount = max(dot(rd, lightDir), 0.0);
-    float glow = pow(sunAmount, 64.0);
-    float disc = pow(sunAmount, 2048.0);
-    vec3 sunColor = vec3(1.0, 0.9, 0.65);
-    return color + sunColor * (glow * 0.35 + disc * 4.0);
+uint loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
+    return chunkBrickMaps.data[chunkIndex(chunkCoord) * BRICK_COUNT + brickIndex(brickCoord)];
 }
 
-bool traceShadow(vec3 origin, vec3 dir) {
-    const float BIG = 1e30;
+uint loadBrickVoxel(uint encodedId, ivec3 localVoxel) {
+    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
+    int flatIndex = localVoxel.x + BRICK_SIZE * (localVoxel.y + BRICK_SIZE * localVoxel.z);
+    uint packed = brickPool.data[explicitBrickIndex * PACKED_BRICK_WORD_COUNT + uint(flatIndex / 4)];
+    return (packed >> (8 * (flatIndex & 3))) & 0xFFu;
+}
 
-    ivec3 p = ivec3(floor(origin));
-    if (!inBounds(p))
+vec3 normalForAxis(int axis, int stepSign) {
+    if (axis == 0) return vec3(-stepSign, 0.0, 0.0);
+    if (axis == 1) return vec3(0.0, -stepSign, 0.0);
+    return vec3(0.0, 0.0, -stepSign);
+}
+
+int selectMinAxis(vec3 v) {
+    if (v.x < v.y) {
+        return v.x < v.z ? 0 : 2;
+    }
+    return v.y < v.z ? 1 : 2;
+}
+
+vec3 entryNormalFromIntersection(vec3 tMin, vec3 rd, float entryT) {
+    if (entryT < 0.0) {
+        return vec3(0.0);
+    }
+
+    int axis = 0;
+    if (tMin.y > tMin.x && tMin.y >= tMin.z) {
+        axis = 1;
+    } else if (tMin.z > tMin.x && tMin.z > tMin.y) {
+        axis = 2;
+    }
+
+    if (axis == 0) return vec3(rd.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0);
+    if (axis == 1) return vec3(0.0, rd.y > 0.0 ? -1.0 : 1.0, 0.0);
+    return vec3(0.0, 0.0, rd.z > 0.0 ? -1.0 : 1.0);
+}
+
+bool intersectAabb(vec3 ro, vec3 rd, vec3 boundsMin, vec3 boundsMax, out float entryT, out float exitT, out vec3 entryNormal) {
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+
+    vec3 t0 = (boundsMin - ro) * inv;
+    vec3 t1 = (boundsMax - ro) * inv;
+    vec3 tMin = min(t0, t1);
+    vec3 tMax = max(t0, t1);
+
+    entryT = max(max(tMin.x, tMin.y), tMin.z);
+    exitT = min(min(tMax.x, tMax.y), tMax.z);
+    entryNormal = entryNormalFromIntersection(tMin, rd, entryT);
+    return exitT > max(entryT, 0.0);
+}
+
+bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
+    if (endT <= startT + EPS) {
         return false;
+    }
 
     vec3 inv = vec3(
-        abs(dir.x) > 1e-6 ? 1.0 / dir.x : BIG,
-        abs(dir.y) > 1e-6 ? 1.0 / dir.y : BIG,
-        abs(dir.z) > 1e-6 ? 1.0 / dir.z : BIG
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
     );
-
-    ivec3 step = ivec3(
-        dir.x > 0.0 ? 1 : -1,
-        dir.y > 0.0 ? 1 : -1,
-        dir.z > 0.0 ? 1 : -1
-    );
-
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
     vec3 tDelta = abs(inv);
-    vec3 next = vec3(
-        step.x > 0 ? float(p.x + 1) : float(p.x),
-        step.y > 0 ? float(p.y + 1) : float(p.y),
-        step.z > 0 ? float(p.z + 1) : float(p.z)
-    );
 
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 voxel = ivec3(floor(samplePos));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(
+        step.x > 0 ? float(voxel.x + 1) : float(voxel.x),
+        step.y > 0 ? float(voxel.y + 1) : float(voxel.y),
+        step.z > 0 ? float(voxel.z + 1) : float(voxel.z)
+    );
     vec3 tMax = vec3(
-        (next.x - origin.x) * inv.x,
-        (next.y - origin.y) * inv.y,
-        (next.z - origin.z) * inv.z
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
     );
 
-    float t = 0.0;
-
-    for (int i = 0; i < 512; i++) {
-        if (isSolid(p))
-            return true;
-
-        if (tMax.x < tMax.y) {
-            if (tMax.x < tMax.z) {
-                p.x += step.x;
-                t = tMax.x;
-                tMax.x += tDelta.x;
-            } else {
-                p.z += step.z;
-                t = tMax.z;
-                tMax.z += tDelta.z;
+    for (int i = 0; i < BRICK_SIZE * BRICK_SIZE * BRICK_SIZE; i++) {
+        ivec3 localVoxel = voxel - brickWorldMin;
+        if (all(greaterThanEqual(localVoxel, ivec3(0))) && all(lessThan(localVoxel, ivec3(BRICK_SIZE)))) {
+            if (loadBrickVoxel(encodedId, localVoxel) != AIR_MATERIAL) {
+                hitT = t;
+                hitNormal = currentNormal;
+                return true;
             }
         } else {
-            if (tMax.y < tMax.z) {
-                p.y += step.y;
-                t = tMax.y;
-                tMax.y += tDelta.y;
-            } else {
-                p.z += step.z;
-                t = tMax.z;
-                tMax.z += tDelta.z;
-            }
+            break;
         }
 
-        if (t > pc.renderParams.y || !inBounds(p))
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
             break;
+        }
+
+        if (axis == 0) {
+            voxel.x += step.x;
+            tMax.x += tDelta.x;
+        } else if (axis == 1) {
+            voxel.y += step.y;
+            tMax.y += tDelta.y;
+        } else {
+            voxel.z += step.z;
+            tMax.z += tDelta.z;
+        }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
     }
 
     return false;
 }
 
-vec3 ambientLight(vec3 normal, vec3 lightDir) {
-    float sky = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
-    float ground = clamp(0.5 - normal.y * 0.5, 0.0, 1.0);
-    float horizon = 1.0 - abs(normal.y);
-    float sunWrap = clamp((dot(normal, lightDir) + 0.55) / 1.55, 0.0, 1.0);
+bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
 
-    vec3 skyColor = vec3(0.18, 0.24, 0.34) * sky;
-    vec3 groundColor = vec3(0.10, 0.08, 0.06) * ground;
-    vec3 horizonColor = vec3(0.06, 0.07, 0.08) * horizon * 0.5;
-    vec3 sunBounce = vec3(0.12, 0.10, 0.08) * pow(sunWrap, 2.0);
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(BRICK_SIZE) * inv);
 
-    float strength = 0.5f;
-    return strength*(skyColor + groundColor + horizonColor + sunBounce + vec3(0.03, 0.03, 0.035));
+    ivec3 chunkWorldMin = chunkCoord * CHUNK_SIZE;
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE)));
+    localBrick = clamp(localBrick, ivec3(0), ivec3(BRICKS_PER_AXIS - 1));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
+        float(step.x > 0 ? localBrick.x + 1 : localBrick.x),
+        float(step.y > 0 ? localBrick.y + 1 : localBrick.y),
+        float(step.z > 0 ? localBrick.z + 1 : localBrick.z)
+    ) * float(BRICK_SIZE);
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    for (int i = 0; i < BRICK_COUNT; i++) {
+        uint entry = loadBrickEntry(chunkCoord, localBrick);
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+
+        if (entry == FULL_STONE_MATERIAL) {
+            hitT = t;
+            hitNormal = currentNormal;
+            return true;
+        }
+
+        if (entry >= MATERIAL_COUNT) {
+            ivec3 brickWorldMin = chunkWorldMin + localBrick * BRICK_SIZE;
+            if (traceExplicitBrick(ro, rd, brickWorldMin, entry, t, segmentEnd, currentNormal, hitT, hitNormal)) {
+                return true;
+            }
+        }
+
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
+            break;
+        }
+
+        if (axis == 0) {
+            localBrick.x += step.x;
+            tMax.x += tDelta.x;
+        } else if (axis == 1) {
+            localBrick.y += step.y;
+            tMax.y += tDelta.y;
+        } else {
+            localBrick.z += step.z;
+            tMax.z += tDelta.z;
+        }
+
+        if (any(lessThan(localBrick, ivec3(0))) || any(greaterThanEqual(localBrick, ivec3(BRICKS_PER_AXIS)))) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+    }
+
+    return false;
 }
 
-vec3 terrainColor(vec3 hitPos, vec3 normal) {
-    float height01 = clamp(hitPos.y / float(pc.worldDimensions.y), 0.0, 1.0);
-    float slope = 1.0 - max(normal.y, 0.0);
+bool traceScene(vec3 ro, vec3 rd, float maxDistance, out float hitT, out vec3 hitNormal) {
+    float worldEntryT = 0.0;
+    float worldExitT = 0.0;
+    vec3 worldEntryNormal = vec3(0.0);
+    if (!intersectAabb(ro, rd, vec3(0.0), vec3(pc.worldDimensions.xyz), worldEntryT, worldExitT, worldEntryNormal)) {
+        return false;
+    }
 
-    vec3 grassLow = vec3(0.27, 0.41, 0.20);
-    vec3 grassHigh = vec3(0.42, 0.58, 0.30);
-    vec3 dirt = vec3(0.44, 0.31, 0.22);
-    vec3 rock = vec3(0.48, 0.46, 0.44);
+    float startT = max(worldEntryT, 0.0);
+    float endT = min(worldExitT, maxDistance);
+    if (endT <= startT + EPS) {
+        return false;
+    }
 
-    vec3 grass = mix(grassLow, grassHigh, smoothstep(0.15, 0.9, height01));
-    vec3 base = mix(grass, dirt, smoothstep(0.18, 0.55, slope));
-    base = mix(base, rock, smoothstep(0.45, 0.9, slope));
-    base = mix(base, vec3(0.72, 0.72, 0.75), smoothstep(0.78, 0.98, height01));
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(CHUNK_SIZE) * inv);
 
-    return base;
-}
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 chunkCoord = ivec3(floor(samplePos / float(CHUNK_SIZE)));
+    chunkCoord = clamp(chunkCoord, ivec3(0), pc.chunkCounts.xyz - ivec3(1));
+    vec3 currentNormal = worldEntryNormal;
 
-vec3 toneMap(vec3 color) {
-    color = color / (vec3(1.0) + color);
-    return pow(color, vec3(1.0 / 2.2));
+    vec3 nextBoundary = vec3(
+        float(step.x > 0 ? chunkCoord.x + 1 : chunkCoord.x),
+        float(step.y > 0 ? chunkCoord.y + 1 : chunkCoord.y),
+        float(step.z > 0 ? chunkCoord.z + 1 : chunkCoord.z)
+    ) * float(CHUNK_SIZE);
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    int maxChunkSteps = pc.chunkCounts.x * pc.chunkCounts.y * pc.chunkCounts.z;
+    for (int i = 0; i < maxChunkSteps; i++) {
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+        if (traceChunk(ro, rd, chunkCoord, t, segmentEnd, currentNormal, hitT, hitNormal)) {
+            return true;
+        }
+
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
+            break;
+        }
+
+        if (axis == 0) {
+            chunkCoord.x += step.x;
+            tMax.x += tDelta.x;
+        } else if (axis == 1) {
+            chunkCoord.y += step.y;
+            tMax.y += tDelta.y;
+        } else {
+            chunkCoord.z += step.z;
+            tMax.z += tDelta.z;
+        }
+
+        if (!inChunkBounds(chunkCoord)) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+    }
+
+    return false;
 }
 
 void main() {
-
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(destImage);
 
@@ -169,7 +368,6 @@ void main() {
     screen.y *= -1.0;
 
     vec3 ro = pc.cameraPos.xyz;
-
     vec3 rd = normalize(
         pc.cameraForward.xyz * pc.renderParams.z +
         pc.cameraRight.xyz * screen.x +
@@ -180,116 +378,21 @@ void main() {
     vec3 skyColor = addSun(backgroundColor(rd), rd, lightDir);
     vec3 color = skyColor;
 
-    // DDA
+    float hitT = 0.0;
+    vec3 hitNormal = vec3(0.0);
+    if (traceScene(ro, rd, pc.renderParams.y, hitT, hitNormal)) {
+        vec3 shadingNormal = length(hitNormal) > 0.5 ? normalize(hitNormal) : normalize(-rd);
+        vec3 hitPos = ro + rd * hitT;
+        ivec3 voxelPos = ivec3(floor(hitPos - shadingNormal * 0.001));
 
-    vec3 worldMin = vec3(0.0);
-    vec3 worldMax = vec3(pc.worldDimensions.xyz);
+        vec3 baseColor = stoneColor(voxelPos);
+        float ambient = 0.22;
+        float sun = max(dot(shadingNormal, lightDir), 0.0);
+        float lighting = ambient + 0.78 * sun;
 
-    const float BIG = 1e30;
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-
-    vec3 t0 = (worldMin - ro) * inv;
-    vec3 t1 = (worldMax - ro) * inv;
-
-    vec3 tMin = min(t0, t1);
-    vec3 tMaxB = max(t0, t1);
-
-    float entryT = max(max(tMin.x, tMin.y), tMin.z);
-    float exitT  = min(min(tMaxB.x, tMaxB.y), tMaxB.z);
-
-    if (exitT > max(entryT, 0.0)) {
-
-        float t = max(entryT, 0.0);
-
-        vec3 pos = ro + rd * t;
-        ivec3 p = ivec3(floor(pos));
-
-        ivec3 step = ivec3(
-            rd.x > 0 ? 1 : -1,
-            rd.y > 0 ? 1 : -1,
-            rd.z > 0 ? 1 : -1
-        );
-
-        vec3 tDelta = abs(inv);
-
-        vec3 next = vec3(
-            step.x > 0 ? float(p.x + 1) : float(p.x),
-            step.y > 0 ? float(p.y + 1) : float(p.y),
-            step.z > 0 ? float(p.z + 1) : float(p.z)
-        );
-
-        vec3 tMax = vec3(
-            (next.x - pos.x) * inv.x,
-            (next.y - pos.y) * inv.y,
-            (next.z - pos.z) * inv.z
-        );
-
-        vec3 nrm = vec3(0.0);
-
-        while (t < min(exitT, pc.renderParams.y)) {
-
-            if (isSolid(p)) {
-
-                vec3 hitPos = ro + rd * t;
-                vec3 shadingNormal = normalize(nrm);
-
-                vec3 shadowOrigin = hitPos + shadingNormal * 0.02 + lightDir * 0.02;
-                float shadow = traceShadow(shadowOrigin, lightDir) ? 0.38 : 1.0;
-
-                float ndl = dot(shadingNormal, lightDir);
-                float wrappedDiffuse = clamp((ndl + 0.65) / 1.65, 0.0, 1.0);
-                float sunLight = pow(wrappedDiffuse, 1.1);
-                float fresnel = pow(1.0 - max(dot(shadingNormal, -rd), 0.0), 4.0);
-
-                vec3 baseColor = terrainColor(hitPos, shadingNormal);
-                vec3 indirect = ambientLight(shadingNormal, lightDir);
-                vec3 direct = vec3(1.35, 1.12, 0.86) * sunLight * shadow * 1.25;
-                vec3 rim = vec3(0.95, 0.90, 0.82) * fresnel * 0.06;
-
-                color = baseColor * (indirect + direct) + rim;
-
-                float fog = 1.0 - exp(-t * 0.012);
-                color = mix(color, skyColor, fog);
-
-                break;
-            }
-
-            if (tMax.x < tMax.y) {
-                if (tMax.x < tMax.z) {
-                    p.x += step.x;
-                    t = tMax.x;
-                    tMax.x += tDelta.x;
-                    nrm = vec3(-step.x, 0, 0);
-                } else {
-                    p.z += step.z;
-                    t = tMax.z;
-                    tMax.z += tDelta.z;
-                    nrm = vec3(0, 0, -step.z);
-                }
-            } else {
-                if (tMax.y < tMax.z) {
-                    p.y += step.y;
-                    t = tMax.y;
-                    tMax.y += tDelta.y;
-                    nrm = vec3(0, -step.y, 0);
-                } else {
-                    p.z += step.z;
-                    t = tMax.z;
-                    tMax.z += tDelta.z;
-                    nrm = vec3(0, 0, -step.z);
-                }
-            }
-
-            if (!inBounds(p))
-                break;
-        }
+        color = baseColor * lighting;
     }
 
-        color = toneMap(color);
+    color = applyGamma(color);
     imageStore(destImage, pixel, vec4(color, 1.0));
 }

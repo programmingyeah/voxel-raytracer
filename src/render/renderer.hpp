@@ -32,7 +32,8 @@ private:
     CommandPool commandPool;
     std::vector<Image> computeImages;
     std::vector<bool> computeImagesInitialized;
-    Buffer voxelBuffer{};
+    Buffer chunkBrickMapBuffer{};
+    Buffer brickPoolBuffer{};
     SyncManager syncManager;
     VkPipeline computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
@@ -48,7 +49,7 @@ private:
     void initWindow();
     void initVulkan();
     void createComputeImages();
-    void createVoxelBuffer();
+    void createWorldBuffers();
     void createDescriptorSets(bool allocateSets);
     void createComputePipeline();
     VkShaderModule createShaderModule(const std::vector<char>& code);

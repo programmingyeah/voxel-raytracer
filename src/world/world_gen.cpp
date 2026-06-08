@@ -86,7 +86,7 @@ void WorldGenerator::generateTerrain(VoxelWorld& world) const {
         for (uint32_t chunkY = 0; chunkY < world.getChunkCounts().y; chunkY++) {
             for (uint32_t chunkX = 0; chunkX < world.getChunkCounts().x; chunkX++) {
                 Chunk& chunk = world.getChunk(chunkX, chunkY, chunkZ);
-                chunk.clear(0);
+                chunk.clear();
 
                 for (uint32_t localZ = 0; localZ < Chunk::SIZE; localZ++) {
                     const uint32_t worldZ = chunkZ * Chunk::SIZE + localZ;
