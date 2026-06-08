@@ -23,14 +23,24 @@ layout(push_constant) uniform PushConstants {
 
 const float BIG = 1e30;
 const float EPS = 1e-4;
-const int CHUNK_SIZE = 64;
 const int BRICK_SIZE = 8;
-const int BRICKS_PER_AXIS = CHUNK_SIZE / BRICK_SIZE;
-const int BRICK_COUNT = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
 const int PACKED_BRICK_WORD_COUNT = (BRICK_SIZE * BRICK_SIZE * BRICK_SIZE) / 4;
 const uint AIR_MATERIAL = 0u;
 const uint FULL_STONE_MATERIAL = 1u;
 const uint MATERIAL_COUNT = 2u;
+
+int chunkSize() {
+    return pc.chunkCounts.w;
+}
+
+int bricksPerAxis() {
+    return chunkSize() / BRICK_SIZE;
+}
+
+int brickCount() {
+    int count = bricksPerAxis();
+    return count * count * count;
+}
 
 vec3 backgroundColor(vec3 rd) {
     float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
@@ -78,11 +88,12 @@ int chunkIndex(ivec3 chunkCoord) {
 }
 
 int brickIndex(ivec3 brickCoord) {
-    return brickCoord.x + BRICKS_PER_AXIS * (brickCoord.y + BRICKS_PER_AXIS * brickCoord.z);
+    int count = bricksPerAxis();
+    return brickCoord.x + count * (brickCoord.y + count * brickCoord.z);
 }
 
 uint loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
-    return chunkBrickMaps.data[chunkIndex(chunkCoord) * BRICK_COUNT + brickIndex(brickCoord)];
+    return chunkBrickMaps.data[chunkIndex(chunkCoord) * brickCount() + brickIndex(brickCoord)];
 }
 
 uint loadBrickVoxel(uint encodedId, ivec3 localVoxel) {
@@ -218,11 +229,13 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
     vec3 tDelta = abs(vec3(BRICK_SIZE) * inv);
 
-    ivec3 chunkWorldMin = chunkCoord * CHUNK_SIZE;
+    int currentChunkSize = chunkSize();
+    int currentBricksPerAxis = bricksPerAxis();
+    ivec3 chunkWorldMin = chunkCoord * currentChunkSize;
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
     ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE)));
-    localBrick = clamp(localBrick, ivec3(0), ivec3(BRICKS_PER_AXIS - 1));
+    localBrick = clamp(localBrick, ivec3(0), ivec3(currentBricksPerAxis - 1));
     vec3 currentNormal = entryNormal;
 
     vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
@@ -236,7 +249,8 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
         (nextBoundary.z - ro.z) * inv.z
     );
 
-    for (int i = 0; i < BRICK_COUNT; i++) {
+    int maxBrickSteps = brickCount();
+    for (int i = 0; i < maxBrickSteps; i++) {
         uint entry = loadBrickEntry(chunkCoord, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
@@ -270,7 +284,7 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
             tMax.z += tDelta.z;
         }
 
-        if (any(lessThan(localBrick, ivec3(0))) || any(greaterThanEqual(localBrick, ivec3(BRICKS_PER_AXIS)))) {
+        if (any(lessThan(localBrick, ivec3(0))) || any(greaterThanEqual(localBrick, ivec3(currentBricksPerAxis)))) {
             break;
         }
 
@@ -301,11 +315,12 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, out float hitT, out vec3 hi
         abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
     );
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(CHUNK_SIZE) * inv);
+    int currentChunkSize = chunkSize();
+    vec3 tDelta = abs(vec3(currentChunkSize) * inv);
 
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 chunkCoord = ivec3(floor(samplePos / float(CHUNK_SIZE)));
+    ivec3 chunkCoord = ivec3(floor(samplePos / float(currentChunkSize)));
     chunkCoord = clamp(chunkCoord, ivec3(0), pc.chunkCounts.xyz - ivec3(1));
     vec3 currentNormal = worldEntryNormal;
 
@@ -313,7 +328,7 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, out float hitT, out vec3 hi
         float(step.x > 0 ? chunkCoord.x + 1 : chunkCoord.x),
         float(step.y > 0 ? chunkCoord.y + 1 : chunkCoord.y),
         float(step.z > 0 ? chunkCoord.z + 1 : chunkCoord.z)
-    ) * float(CHUNK_SIZE);
+    ) * float(currentChunkSize);
     vec3 tMax = vec3(
         (nextBoundary.x - ro.x) * inv.x,
         (nextBoundary.y - ro.y) * inv.y,

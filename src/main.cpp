@@ -24,12 +24,12 @@ void gameLoop(Camera& camera) {
 
 int main() {
     try {
-        VoxelWorld world(glm::uvec3(10, 3, 10));
+        VoxelWorld world(glm::uvec3(4, 2, 4));
         WorldGenerator worldGenerator;
-        worldGenerator.generateTerrain(world);
+        const WorldGenerationStats worldStats = worldGenerator.generateTerrain(world);
 
-        Camera camera(glm::vec3(160.0f, 128.0f, -96.0f));
-        window = renderer.init(world);
+        Camera camera(glm::vec3(256.0f, 160.0f, -128.0f));
+        window = renderer.init(world, worldStats);
         camera.attachWindow(window);
 
         gameLoop(camera);

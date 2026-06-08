@@ -22,6 +22,7 @@ public:
     const Chunk& getChunk(uint32_t x, uint32_t y, uint32_t z) const;
 
     glm::uvec3 getChunkCounts() const { return chunkCounts; }
+    size_t getChunkCount() const { return chunks.size(); }
     glm::uvec3 getVoxelDimensions() const;
 
     GpuVoxelBuffers buildGpuBuffers() const;

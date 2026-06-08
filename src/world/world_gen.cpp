@@ -1,5 +1,6 @@
 #include "world_gen.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -75,16 +76,20 @@ float sampleHeight(const glm::vec2& position, const glm::uvec3& voxelDimensions)
 }
 }
 
-void WorldGenerator::generateTerrain(VoxelWorld& world) const {
+WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world) const {
+    WorldGenerationStats stats{};
+
     const glm::uvec3 voxelDimensions = world.getVoxelDimensions();
     const glm::vec2 horizontalCenter(
         (static_cast<float>(voxelDimensions.x) - 1.0f) * 0.5f,
         (static_cast<float>(voxelDimensions.z) - 1.0f) * 0.5f
     );
+    const auto generationStart = std::chrono::steady_clock::now();
 
     for (uint32_t chunkZ = 0; chunkZ < world.getChunkCounts().z; chunkZ++) {
         for (uint32_t chunkY = 0; chunkY < world.getChunkCounts().y; chunkY++) {
             for (uint32_t chunkX = 0; chunkX < world.getChunkCounts().x; chunkX++) {
+                const auto chunkStart = std::chrono::steady_clock::now();
                 Chunk& chunk = world.getChunk(chunkX, chunkY, chunkZ);
                 chunk.clear();
 
@@ -103,12 +108,30 @@ void WorldGenerator::generateTerrain(VoxelWorld& world) const {
                             const uint32_t worldY = chunkY * Chunk::SIZE + localY;
                             if (static_cast<float>(worldY) <= terrainHeight) {
                                 chunk.set(localX, localY, localZ, 1);
+                                stats.solidVoxelCount++;
                             }
                         }
                     }
                 }
+
+                stats.totalGenerationMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - chunkStart
+                ).count();
             }
         }
     }
+
+    const uint64_t chunkCount = static_cast<uint64_t>(world.getChunkCounts().x) *
+                                static_cast<uint64_t>(world.getChunkCounts().y) *
+                                static_cast<uint64_t>(world.getChunkCounts().z);
+    if (chunkCount > 0) {
+        stats.averageChunkGenerationMs = stats.totalGenerationMs / static_cast<double>(chunkCount);
+    }
+
+    stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - generationStart
+    ).count();
+
+    return stats;
 }
 

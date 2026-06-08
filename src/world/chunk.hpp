@@ -23,7 +23,7 @@ struct Brick {
 
 class Chunk {
 public:
-    static constexpr uint32_t SIZE = 64;
+    static constexpr uint32_t SIZE = 128;
     static constexpr size_t BRICK_COUNT = (size_t) (SIZE/BRICK_SIZE) * (SIZE/BRICK_SIZE) * (SIZE/BRICK_SIZE);
     static constexpr size_t VOXEL_COUNT = static_cast<size_t>(SIZE) * SIZE * SIZE;
 

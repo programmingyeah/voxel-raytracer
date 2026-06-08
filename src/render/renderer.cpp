@@ -1,7 +1,11 @@
 #include "renderer.hpp"
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "imgui.h"
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_vulkan.h"
 #include "utils.hpp"
 
 namespace {
@@ -64,6 +68,28 @@ void insertImageBarrier(
         1, &barrier
     );
 }
+
+std::string formatByteSize(VkDeviceSize bytes)
+{
+    static const char* units[] = {"B", "KiB", "MiB", "GiB"};
+    double size = static_cast<double>(bytes);
+    size_t unitIndex = 0;
+    while (size >= 1024.0 && unitIndex + 1 < 4) {
+        size /= 1024.0;
+        unitIndex++;
+    }
+
+    char buffer[64]{};
+    std::snprintf(buffer, sizeof(buffer), "%.2f %s", size, units[unitIndex]);
+    return buffer;
+}
+
+void checkVkResult(VkResult result)
+{
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("ImGui Vulkan backend call failed");
+    }
+}
 }
 
 void VulkanApp::framebufferResizeCallback(GLFWwindow* window, int width, int height) {
@@ -73,8 +99,10 @@ void VulkanApp::framebufferResizeCallback(GLFWwindow* window, int width, int hei
     app->framebufferResized = true;
 }
 
-GLFWwindow* VulkanApp::init(const VoxelWorld& worldRef) {
+GLFWwindow* VulkanApp::init(const VoxelWorld& worldRef, const WorldGenerationStats& inWorldStats) {
     world = &worldRef;
+    worldStats = inWorldStats;
+    lastFrameTimestamp = std::chrono::steady_clock::now();
     initWindow();
     initVulkan();
 
@@ -131,6 +159,10 @@ void VulkanApp::initVulkan() {
     createWorldBuffers();
     createDescriptorSets(true);
     createComputePipeline();
+    createImGuiDescriptorPool();
+    createImGuiRenderPass();
+    createImGuiFramebuffers();
+    initImGui();
     commandPool.allocateCommandBuffers(&instance, MAX_FRAMES_IN_FLIGHT);
     syncManager.init(&instance, swapchain.getSwapImgCount(), MAX_FRAMES_IN_FLIGHT);
 }
@@ -188,6 +220,125 @@ void VulkanApp::createComputePipeline() {
     }
 
     vkDestroyShaderModule(instance.device(), shaderModule, nullptr);
+}
+
+void VulkanApp::createImGuiDescriptorPool() {
+    const std::vector<VkDescriptorPoolSize> poolSizes = {
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 100},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 100},
+        {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 100},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 100},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 100},
+        {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 100}
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 100u * static_cast<uint32_t>(poolSizes.size());
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+
+    if (vkCreateDescriptorPool(instance.device(), &poolInfo, nullptr, &imguiDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create ImGui descriptor pool!");
+    }
+}
+
+void VulkanApp::createImGuiRenderPass() {
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = swapchain.getSwapImgFormat();
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(instance.device(), &renderPassInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create ImGui render pass!");
+    }
+}
+
+void VulkanApp::createImGuiFramebuffers() {
+    cleanupImGuiFramebuffers();
+
+    const VkExtent2D extent = swapchain.getSwapExtent();
+    swapchainImageViews.resize(swapchain.getSwapImgCount());
+    imguiFramebuffers.resize(swapchain.getSwapImgCount());
+
+    for (size_t i = 0; i < swapchain.getSwapImgCount(); i++) {
+        swapchainImageViews[i] = instance.createImageView(swapchain.getImage(i), swapchain.getSwapImgFormat(), VK_IMAGE_ASPECT_COLOR_BIT);
+
+        VkImageView attachments[] = {swapchainImageViews[i]};
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = imguiRenderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.width = extent.width;
+        framebufferInfo.height = extent.height;
+        framebufferInfo.layers = 1;
+
+        if (vkCreateFramebuffer(instance.device(), &framebufferInfo, nullptr, &imguiFramebuffers[i]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create ImGui framebuffer!");
+        }
+    }
+}
+
+void VulkanApp::initImGui() {
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplGlfw_InitForVulkan(window, true);
+
+    const QueueFamilyIndices queueFamilyIndices = instance.findQueueFamilies(instance.physicalDevice());
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.Instance = instance.getHandle();
+    initInfo.PhysicalDevice = instance.physicalDevice();
+    initInfo.Device = instance.device();
+    initInfo.QueueFamily = queueFamilyIndices.graphicsFamily.value();
+    initInfo.Queue = instance.getGraphicsQueue();
+    initInfo.DescriptorPool = imguiDescriptorPool;
+    initInfo.RenderPass = imguiRenderPass;
+    initInfo.MinImageCount = static_cast<uint32_t>(swapchain.getSwapImgCount());
+    initInfo.ImageCount = static_cast<uint32_t>(swapchain.getSwapImgCount());
+    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.CheckVkResultFn = checkVkResult;
+
+    ImGui_ImplVulkan_Init(&initInfo);
 }
 
 void VulkanApp::createComputeImages() {
@@ -273,9 +424,50 @@ void VulkanApp::createDescriptorSets(bool allocateSets) {
     }
 }
 
+void VulkanApp::updateFrameTiming() {
+    const auto now = std::chrono::steady_clock::now();
+    const float deltaMs = std::chrono::duration<float, std::milli>(now - lastFrameTimestamp).count();
+    lastFrameTimestamp = now;
+
+    frameTimeMs = deltaMs;
+    if (deltaMs > 0.0f) {
+        const float instantFrameRate = 1000.0f / deltaMs;
+        frameRate = frameRate == 0.0f ? instantFrameRate : frameRate * 0.9f + instantFrameRate * 0.1f;
+    }
+}
+
+void VulkanApp::buildDiagnosticsUi() {
+    const size_t chunkCount = world != nullptr ? world->getChunkCount() : 0;
+    const uint64_t worldVoxelCount = static_cast<uint64_t>(chunkCount) * Chunk::VOXEL_COUNT;
+    const size_t brickCount = Chunk::getBrickPool().size();
+    const VkDeviceSize worldBufferBytes = chunkBrickMapBuffer.size + brickPoolBuffer.size;
+
+    const std::string worldBufferSize = formatByteSize(worldBufferBytes);
+    const std::string chunkMapBufferSize = formatByteSize(chunkBrickMapBuffer.size);
+    const std::string brickPoolBufferSize = formatByteSize(brickPoolBuffer.size);
+
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::Begin("Diagnostics");
+    ImGui::Text("Frame rate: %.1f FPS", frameRate);
+    ImGui::Text("Frame time: %.2f ms", frameTimeMs);
+    ImGui::Separator();
+    ImGui::Text("Chunk count: %zu", chunkCount);
+    ImGui::Text("Voxel count: %llu", static_cast<unsigned long long>(worldVoxelCount));
+    ImGui::Text("Solid voxels: %llu", static_cast<unsigned long long>(worldStats.solidVoxelCount));
+    ImGui::Text("Brick count: %zu", brickCount);
+    ImGui::Text("Avg chunk load: %.3f ms", worldStats.averageChunkGenerationMs);
+    ImGui::Text("World gen total: %.2f ms", worldStats.totalGenerationMs);
+    ImGui::Separator();
+    ImGui::Text("World buffer VRAM: %s", worldBufferSize.c_str());
+    ImGui::Text("Chunk map buffer: %s", chunkMapBufferSize.c_str());
+    ImGui::Text("Brick pool buffer: %s", brickPoolBufferSize.c_str());
+    ImGui::End();
+}
+
 void VulkanApp::cleanup() {
     vkDeviceWaitIdle(instance.device());
     cleanupSwapchain();
+    cleanupImGui();
 
     if (computePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(instance.device(), computePipeline, nullptr);
@@ -320,6 +512,13 @@ void VulkanApp::drawFrame(const Camera& camera) {
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         throw std::runtime_error("failed to acquire swap chain image!");
     }
+
+    updateFrameTiming();
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    buildDiagnosticsUi();
+    ImGui::Render();
 
     syncManager.waitForImageIfNeeded(&instance, imageIndex);
     vkResetFences(instance.device(), 1, &frameSyncObjects.inFlight);
@@ -412,7 +611,7 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         static_cast<int>(chunkCounts.x),
         static_cast<int>(chunkCounts.y),
         static_cast<int>(chunkCounts.z),
-        0
+        static_cast<int>(Chunk::SIZE)
     );
     pushConstants.renderParams = glm::vec4(0.1f, static_cast<float>(glm::length(glm::vec3(worldDimensions))) * 2.0f, 1.4f, 0.0f);
 
@@ -474,12 +673,23 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         commandBuffer,
         swapchain.getImage(imageIndex),
         VK_ACCESS_TRANSFER_WRITE_BIT,
-        0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
     );
+
+    VkRenderPassBeginInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = imguiRenderPass;
+    renderPassInfo.framebuffer = imguiFramebuffers.at(imageIndex);
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = extent;
+
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+    vkCmdEndRenderPass(commandBuffer);
 
     computeImagesInitialized[currentFrame] = true;
 
@@ -503,10 +713,30 @@ void VulkanApp::recreateSwapChain() {
     swapchain.init(&instance, window);
     createComputeImages();
     createDescriptorSets(false);
+    createImGuiFramebuffers();
+    ImGui_ImplVulkan_SetMinImageCount(static_cast<uint32_t>(swapchain.getSwapImgCount()));
     syncManager.resetImages(&instance, swapchain.getSwapImgCount());
 }
 
+void VulkanApp::cleanupImGuiFramebuffers() {
+    for (VkFramebuffer framebuffer : imguiFramebuffers) {
+        if (framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(instance.device(), framebuffer, nullptr);
+        }
+    }
+    imguiFramebuffers.clear();
+
+    for (VkImageView imageView : swapchainImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(instance.device(), imageView, nullptr);
+        }
+    }
+    swapchainImageViews.clear();
+}
+
 void VulkanApp::cleanupSwapchain() {
+    cleanupImGuiFramebuffers();
+
     for (auto& image : computeImages) {
         image.cleanup(&instance);
     }
@@ -514,4 +744,22 @@ void VulkanApp::cleanupSwapchain() {
     computeImages.clear();
     computeImagesInitialized.clear();
     swapchain.cleanup(&instance);
+}
+
+void VulkanApp::cleanupImGui() {
+    if (ImGui::GetCurrentContext() != nullptr) {
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+    }
+
+    if (imguiRenderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(instance.device(), imguiRenderPass, nullptr);
+        imguiRenderPass = VK_NULL_HANDLE;
+    }
+
+    if (imguiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(instance.device(), imguiDescriptorPool, nullptr);
+        imguiDescriptorPool = VK_NULL_HANDLE;
+    }
 }
