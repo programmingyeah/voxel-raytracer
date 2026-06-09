@@ -15,9 +15,15 @@
 
 static constexpr uint32_t BRICK_SIZE = 8; // should be a divisor of SIZE
 static constexpr uint32_t BRICK_VOXEL_COUNT = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;
-static constexpr uint32_t PACKED_BRICK_WORD_COUNT = (BRICK_VOXEL_COUNT + 3u) / 4u;
+static constexpr uint32_t COARSE_CELL_SIZE = 2;
+static constexpr uint32_t COARSE_CELLS_PER_AXIS = BRICK_SIZE / COARSE_CELL_SIZE;
+static constexpr uint32_t COARSE_CELL_COUNT = COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS;
+static constexpr uint32_t OCCUPANCY_MASK_WORD_COUNT = (COARSE_CELL_COUNT + 31u) / 32u;
+static constexpr uint32_t PACKED_BRICK_VOXEL_WORD_COUNT = (BRICK_VOXEL_COUNT + 3u) / 4u;
+static constexpr uint32_t PACKED_BRICK_WORD_COUNT = OCCUPANCY_MASK_WORD_COUNT + PACKED_BRICK_VOXEL_WORD_COUNT;
 
 struct Brick {
+    uint64_t occupancy_mask;
     uint8_t voxels[BRICK_SIZE][BRICK_SIZE][BRICK_SIZE]{};
 };
 

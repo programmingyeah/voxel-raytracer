@@ -24,7 +24,12 @@ layout(push_constant) uniform PushConstants {
 const float BIG = 1e30;
 const float EPS = 1e-4;
 const int BRICK_SIZE = 8;
-const int PACKED_BRICK_WORD_COUNT = (BRICK_SIZE * BRICK_SIZE * BRICK_SIZE) / 4;
+const int COARSE_CELL_SIZE = 2;
+const int COARSE_CELLS_PER_AXIS = BRICK_SIZE / COARSE_CELL_SIZE;
+const int COARSE_CELL_COUNT = COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS;
+const int OCCUPANCY_MASK_WORD_COUNT = (COARSE_CELL_COUNT + 31) / 32;
+const int PACKED_BRICK_VOXEL_WORD_COUNT = (BRICK_SIZE * BRICK_SIZE * BRICK_SIZE) / 4;
+const int PACKED_BRICK_WORD_COUNT = OCCUPANCY_MASK_WORD_COUNT + PACKED_BRICK_VOXEL_WORD_COUNT;
 const uint AIR_MATERIAL = 0u;
 const uint FULL_STONE_MATERIAL = 1u;
 const uint MATERIAL_COUNT = 2u;
@@ -96,11 +101,102 @@ uint loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
     return chunkBrickMaps.data[chunkIndex(chunkCoord) * brickCount() + brickIndex(brickCoord)];
 }
 
+int coarseCellIndex(ivec3 coarseCell) {
+    return coarseCell.x + COARSE_CELLS_PER_AXIS * (coarseCell.y + COARSE_CELLS_PER_AXIS * coarseCell.z);
+}
+
+bool brickHasAnyOccupancy(uint encodedId) {
+    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
+    uint brickBase = explicitBrickIndex * PACKED_BRICK_WORD_COUNT;
+    return (brickPool.data[brickBase] | brickPool.data[brickBase + 1u]) != 0u;
+}
+
+bool loadBrickCoarseOccupancy(uint encodedId, ivec3 coarseCell) {
+    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
+    uint brickBase = explicitBrickIndex * PACKED_BRICK_WORD_COUNT;
+    uint bitIndex = uint(coarseCellIndex(coarseCell));
+    uint word = brickPool.data[brickBase + bitIndex / 32u];
+    return ((word >> (bitIndex & 31u)) & 1u) != 0u;
+}
+
 uint loadBrickVoxel(uint encodedId, ivec3 localVoxel) {
     uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
     int flatIndex = localVoxel.x + BRICK_SIZE * (localVoxel.y + BRICK_SIZE * localVoxel.z);
-    uint packed = brickPool.data[explicitBrickIndex * PACKED_BRICK_WORD_COUNT + uint(flatIndex / 4)];
+    uint packed = brickPool.data[
+        explicitBrickIndex * PACKED_BRICK_WORD_COUNT +
+        uint(OCCUPANCY_MASK_WORD_COUNT) +
+        uint(flatIndex / 4)
+    ];
     return (packed >> (8 * (flatIndex & 3))) & 0xFFu;
+}
+
+vec3 normalForAxis(int axis, int stepSign);
+int selectMinAxis(vec3 v);
+
+bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWorldMin, uint encodedId, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 voxel = ivec3(floor(samplePos));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(
+        step.x > 0 ? float(voxel.x + 1) : float(voxel.x),
+        step.y > 0 ? float(voxel.y + 1) : float(voxel.y),
+        step.z > 0 ? float(voxel.z + 1) : float(voxel.z)
+    );
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    for (int i = 0; i < COARSE_CELL_SIZE * COARSE_CELL_SIZE * COARSE_CELL_SIZE; i++) {
+        ivec3 localVoxelInCell = voxel - cellWorldMin;
+        if (all(greaterThanEqual(localVoxelInCell, ivec3(0))) && all(lessThan(localVoxelInCell, ivec3(COARSE_CELL_SIZE)))) {
+            ivec3 localVoxelInBrick = voxel - brickWorldMin;
+            if (loadBrickVoxel(encodedId, localVoxelInBrick) != AIR_MATERIAL) {
+                hitT = t;
+                hitNormal = currentNormal;
+                return true;
+            }
+        } else {
+            break;
+        }
+
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
+            break;
+        }
+
+        if (axis == 0) {
+            voxel.x += step.x;
+            tMax.x += tDelta.x;
+        } else if (axis == 1) {
+            voxel.y += step.y;
+            tMax.y += tDelta.y;
+        } else {
+            voxel.z += step.z;
+            tMax.z += tDelta.z;
+        }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+    }
+
+    return false;
 }
 
 vec3 normalForAxis(int axis, int stepSign) {
@@ -152,7 +248,7 @@ bool intersectAabb(vec3 ro, vec3 rd, vec3 boundsMin, vec3 boundsMax, out float e
 }
 
 bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
-    if (endT <= startT + EPS) {
+    if (endT <= startT + EPS || !brickHasAnyOccupancy(encodedId)) {
         return false;
     }
 
@@ -162,34 +258,33 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
         abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
     );
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(inv);
+    vec3 tDelta = abs(vec3(COARSE_CELL_SIZE) * inv);
 
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 voxel = ivec3(floor(samplePos));
+    ivec3 localCell = ivec3(floor((samplePos - vec3(brickWorldMin)) / float(COARSE_CELL_SIZE)));
+    localCell = clamp(localCell, ivec3(0), ivec3(COARSE_CELLS_PER_AXIS - 1));
     vec3 currentNormal = entryNormal;
 
-    vec3 nextBoundary = vec3(
-        step.x > 0 ? float(voxel.x + 1) : float(voxel.x),
-        step.y > 0 ? float(voxel.y + 1) : float(voxel.y),
-        step.z > 0 ? float(voxel.z + 1) : float(voxel.z)
-    );
+    vec3 nextBoundary = vec3(brickWorldMin) + vec3(
+        float(step.x > 0 ? localCell.x + 1 : localCell.x),
+        float(step.y > 0 ? localCell.y + 1 : localCell.y),
+        float(step.z > 0 ? localCell.z + 1 : localCell.z)
+    ) * float(COARSE_CELL_SIZE);
     vec3 tMax = vec3(
         (nextBoundary.x - ro.x) * inv.x,
         (nextBoundary.y - ro.y) * inv.y,
         (nextBoundary.z - ro.z) * inv.z
     );
 
-    for (int i = 0; i < BRICK_SIZE * BRICK_SIZE * BRICK_SIZE; i++) {
-        ivec3 localVoxel = voxel - brickWorldMin;
-        if (all(greaterThanEqual(localVoxel, ivec3(0))) && all(lessThan(localVoxel, ivec3(BRICK_SIZE)))) {
-            if (loadBrickVoxel(encodedId, localVoxel) != AIR_MATERIAL) {
-                hitT = t;
-                hitNormal = currentNormal;
+    for (int i = 0; i < COARSE_CELL_COUNT; i++) {
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+
+        if (loadBrickCoarseOccupancy(encodedId, localCell)) {
+            ivec3 cellWorldMin = brickWorldMin + localCell * COARSE_CELL_SIZE;
+            if (traceOccupiedCoarseCell(ro, rd, brickWorldMin, cellWorldMin, encodedId, t, segmentEnd, currentNormal, hitT, hitNormal)) {
                 return true;
             }
-        } else {
-            break;
         }
 
         int axis = selectMinAxis(tMax);
@@ -199,14 +294,18 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
         }
 
         if (axis == 0) {
-            voxel.x += step.x;
+            localCell.x += step.x;
             tMax.x += tDelta.x;
         } else if (axis == 1) {
-            voxel.y += step.y;
+            localCell.y += step.y;
             tMax.y += tDelta.y;
         } else {
-            voxel.z += step.z;
+            localCell.z += step.z;
             tMax.z += tDelta.z;
+        }
+
+        if (any(lessThan(localCell, ivec3(0))) || any(greaterThanEqual(localCell, ivec3(COARSE_CELLS_PER_AXIS)))) {
+            break;
         }
 
         t = nextT;

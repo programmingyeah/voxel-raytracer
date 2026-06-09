@@ -52,11 +52,16 @@ GpuVoxelBuffers VoxelWorld::buildGpuBuffers() const {
 
     for (size_t brickIdx = 0; brickIdx < brickPool.size(); brickIdx++) {
         const Brick& brick = brickPool[brickIdx];
+        const uint32_t brickBaseIndex = static_cast<uint32_t>(brickIdx) * PACKED_BRICK_WORD_COUNT;
+
+        gpuBuffers.brickData[brickBaseIndex] = static_cast<uint32_t>(brick.occupancy_mask & 0xFFFFFFFFu);
+        gpuBuffers.brickData[brickBaseIndex + 1u] = static_cast<uint32_t>(brick.occupancy_mask >> 32u);
+
         for (uint32_t z = 0; z < BRICK_SIZE; z++) {
             for (uint32_t y = 0; y < BRICK_SIZE; y++) {
                 for (uint32_t x = 0; x < BRICK_SIZE; x++) {
                     const uint32_t flatIndex = x + BRICK_SIZE * (y + BRICK_SIZE * z);
-                    const uint32_t packedIndex = static_cast<uint32_t>(brickIdx) * PACKED_BRICK_WORD_COUNT + flatIndex / 4u;
+                    const uint32_t packedIndex = brickBaseIndex + OCCUPANCY_MASK_WORD_COUNT + flatIndex / 4u;
                     const uint32_t shift = 8u * (flatIndex % 4u);
                     gpuBuffers.brickData[packedIndex] |= static_cast<uint32_t>(brick.voxels[x][y][z]) << shift;
                 }
