@@ -1,11 +1,34 @@
 #include "voxel_world.hpp"
+
+#include "materials.hpp"
+
+#include <algorithm>
 #include <stdexcept>
 
 namespace {
-size_t voxelIndex(const glm::uvec3& dims, uint32_t x, uint32_t y, uint32_t z) {
+size_t voxelIndex(const glm::uvec3& dimensions, uint32_t x, uint32_t y, uint32_t z) {
     return static_cast<size_t>(x) +
-           static_cast<size_t>(dims.x) *
-               (static_cast<size_t>(y) + static_cast<size_t>(dims.y) * static_cast<size_t>(z));
+           static_cast<size_t>(dimensions.x) *
+               (static_cast<size_t>(y) + static_cast<size_t>(dimensions.y) * static_cast<size_t>(z));
+}
+
+void packBrick(std::vector<uint32_t>& brickData, size_t brickIndex, const Brick& brick) {
+    const size_t brickBaseIndex = brickIndex * PACKED_BRICK_WORD_COUNT;
+
+    for (uint32_t maskWordIndex = 0; maskWordIndex < OCCUPANCY_MASK_WORD_COUNT; maskWordIndex++) {
+        brickData[brickBaseIndex + maskWordIndex] = brick.occupancyMaskWords[maskWordIndex];
+    }
+
+    for (uint32_t z = 0; z < BRICK_SIZE; z++) {
+        for (uint32_t y = 0; y < BRICK_SIZE; y++) {
+            for (uint32_t x = 0; x < BRICK_SIZE; x++) {
+                const uint32_t flatIndex = x + BRICK_SIZE * (y + BRICK_SIZE * z);
+                const size_t packedWordIndex = brickBaseIndex + OCCUPANCY_MASK_WORD_COUNT + flatIndex / 4u;
+                const uint32_t bitShift = 8u * (flatIndex % 4u);
+                brickData[packedWordIndex] |= static_cast<uint32_t>(brick.voxels[x][y][z]) << bitShift;
+            }
+        }
+    }
 }
 }
 
@@ -39,34 +62,24 @@ glm::uvec3 VoxelWorld::getVoxelDimensions() const {
 GpuVoxelBuffers VoxelWorld::buildGpuBuffers() const {
     GpuVoxelBuffers gpuBuffers;
 
-    gpuBuffers.chunkBrickMaps.resize(chunks.size() * Chunk::BRICK_COUNT);
-    for (size_t chunkIdx = 0; chunkIdx < chunks.size(); chunkIdx++) {
-        const auto& brickMap = chunks[chunkIdx].getBrickMap();
-        for (size_t brickIdx = 0; brickIdx < Chunk::BRICK_COUNT; brickIdx++) {
-            gpuBuffers.chunkBrickMaps[chunkIdx * Chunk::BRICK_COUNT + brickIdx] = brickMap[brickIdx];
+    gpuBuffers.chunkBrickMaps.resize(chunks.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT);
+    for (size_t chunkIndex = 0; chunkIndex < chunks.size(); chunkIndex++) {
+        const auto& brickMap = chunks[chunkIndex].getBrickMap();
+        const size_t chunkBaseIndex = chunkIndex * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+
+        for (size_t brickIndex = 0; brickIndex < Chunk::BRICK_COUNT; brickIndex++) {
+            const BrickMapEntry& entry = brickMap[brickIndex];
+            const size_t entryBaseIndex = chunkBaseIndex + brickIndex * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+            gpuBuffers.chunkBrickMaps[entryBaseIndex] = entry.index;
+            gpuBuffers.chunkBrickMaps[entryBaseIndex + 1u] = entry.materialId;
         }
     }
 
     const std::vector<Brick>& brickPool = Chunk::getBrickPool();
     gpuBuffers.brickData.assign(brickPool.size() * PACKED_BRICK_WORD_COUNT, 0u);
 
-    for (size_t brickIdx = 0; brickIdx < brickPool.size(); brickIdx++) {
-        const Brick& brick = brickPool[brickIdx];
-        const uint32_t brickBaseIndex = static_cast<uint32_t>(brickIdx) * PACKED_BRICK_WORD_COUNT;
-
-        gpuBuffers.brickData[brickBaseIndex] = static_cast<uint32_t>(brick.occupancy_mask & 0xFFFFFFFFu);
-        gpuBuffers.brickData[brickBaseIndex + 1u] = static_cast<uint32_t>(brick.occupancy_mask >> 32u);
-
-        for (uint32_t z = 0; z < BRICK_SIZE; z++) {
-            for (uint32_t y = 0; y < BRICK_SIZE; y++) {
-                for (uint32_t x = 0; x < BRICK_SIZE; x++) {
-                    const uint32_t flatIndex = x + BRICK_SIZE * (y + BRICK_SIZE * z);
-                    const uint32_t packedIndex = brickBaseIndex + OCCUPANCY_MASK_WORD_COUNT + flatIndex / 4u;
-                    const uint32_t shift = 8u * (flatIndex % 4u);
-                    gpuBuffers.brickData[packedIndex] |= static_cast<uint32_t>(brick.voxels[x][y][z]) << shift;
-                }
-            }
-        }
+    for (size_t brickIndex = 0; brickIndex < brickPool.size(); brickIndex++) {
+        packBrick(gpuBuffers.brickData, brickIndex, brickPool[brickIndex]);
     }
 
     return gpuBuffers;
@@ -76,7 +89,7 @@ std::vector<uint32_t> VoxelWorld::buildVoxelBuffer() const {
     const glm::uvec3 voxelDimensions = getVoxelDimensions();
     std::vector<uint32_t> voxels(
         static_cast<size_t>(voxelDimensions.x) * voxelDimensions.y * voxelDimensions.z,
-        0
+        AIR_MATERIAL
     );
 
     for (uint32_t chunkZ = 0; chunkZ < chunkCounts.z; chunkZ++) {

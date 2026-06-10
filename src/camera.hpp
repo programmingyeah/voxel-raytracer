@@ -4,6 +4,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <cmath>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
@@ -17,12 +18,15 @@ public:
         : position(startPosition) {}
 
     void attachWindow(GLFWwindow* window) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        glfwGetCursorPos(window, &lastMouseX, &lastMouseY);
-        firstMouseSample = false;
+        lockCursor(window);
     }
 
     void update(GLFWwindow* window, float deltaTimeSeconds) {
+        handleCursorToggle(window);
+        if (!cursorLocked) {
+            return;
+        }
+
         updateMouseLook(window);
         updateMovement(window, deltaTimeSeconds);
     }
@@ -48,7 +52,51 @@ public:
         return glm::normalize(glm::cross(getRight(), getForward()));
     }
 
+    bool isCursorLocked() const { return cursorLocked; }
+
 private:
+    void handleCursorToggle(GLFWwindow* window) {
+        const bool escapePressed = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+        if (escapePressed && !escapePressedLastFrame) {
+            if (cursorLocked) {
+                unlockCursor(window);
+            } else {
+                lockCursor(window);
+            }
+        }
+        escapePressedLastFrame = escapePressed;
+    }
+
+    void lockCursor(GLFWwindow* window) {
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        centerCursor(window);
+        if (glfwRawMouseMotionSupported()) {
+            glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+        }
+        firstMouseSample = true;
+        cursorLocked = true;
+    }
+
+    void unlockCursor(GLFWwindow* window) {
+        if (glfwRawMouseMotionSupported()) {
+            glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_FALSE);
+        }
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        cursorLocked = false;
+    }
+
+    void centerCursor(GLFWwindow* window) {
+        int windowWidth = 0;
+        int windowHeight = 0;
+        glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+        const double centerX = static_cast<double>(windowWidth) * 0.5;
+        const double centerY = static_cast<double>(windowHeight) * 0.5;
+        glfwSetCursorPos(window, centerX, centerY);
+        lastMouseX = centerX;
+        lastMouseY = centerY;
+    }
+
     void updateMouseLook(GLFWwindow* window) {
         double mouseX = 0.0;
         double mouseY = 0.0;
@@ -58,6 +106,7 @@ private:
             lastMouseX = mouseX;
             lastMouseY = mouseY;
             firstMouseSample = false;
+            return;
         }
 
         const float offsetX = static_cast<float>(mouseX - lastMouseX);
@@ -89,6 +138,8 @@ private:
     float pitchDegrees = 0.0f;
     float movementSpeed = 28.0f;
     float lookSensitivity = 0.08f;
+    bool cursorLocked = true;
+    bool escapePressedLastFrame = false;
     bool firstMouseSample = true;
     double lastMouseX = 0.0;
     double lastMouseY = 0.0;

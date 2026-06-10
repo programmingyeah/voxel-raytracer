@@ -7,9 +7,9 @@
 #include "image.hpp"
 #include "buffer.hpp"
 #include "sync_manager.hpp"
-#include "world/voxel_world.hpp"
-#include "world/world_gen.hpp"
-#include "camera.hpp"
+#include "../world/voxel_world.hpp"
+#include "../world/world_gen.hpp"
+#include "../camera.hpp"
 #include <chrono>
 #include <cstdint>
 #include <vector>
@@ -53,6 +53,8 @@ private:
     std::chrono::steady_clock::time_point lastFrameTimestamp{};
     float frameRate = 0.0f;
     float frameTimeMs = 0.0f;
+    int rayQueryVisualizationMode = 1;
+    float rayQueryVisualizationIntensity = 1.0f;
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 

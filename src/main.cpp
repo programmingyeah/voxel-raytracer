@@ -3,6 +3,9 @@
 #include <chrono>
 #include <iostream>
 
+// note to future self: implement SDF at the BrickMap level, you gain sparsity win with little cost, 
+// test result: with 16 chunk render distance (204 meters), SDF data would be 2 MiB, brick data would be 150 MiB (awesome?)
+
 GLFWwindow* window = nullptr;
 VulkanApp renderer;
 
@@ -24,11 +27,11 @@ void gameLoop(Camera& camera) {
 
 int main() {
     try {
-        VoxelWorld world(glm::uvec3(4, 2, 4));
+        VoxelWorld world(glm::uvec3(6, 2, 6));
         WorldGenerator worldGenerator;
         const WorldGenerationStats worldStats = worldGenerator.generateTerrain(world);
 
-        Camera camera(glm::vec3(256.0f, 160.0f, -128.0f));
+        Camera camera(glm::vec3(0.0f, 160.0f, 0.0f));
         window = renderer.init(world, worldStats);
         camera.attachWindow(window);
 

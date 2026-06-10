@@ -1,66 +1,66 @@
 #include "chunk.hpp"
-#include "materials.hpp"
+
+#include <cstring>
 
 std::vector<Brick> Chunk::bricks{};
 
 namespace {
-constexpr uint32_t BRICKS_PER_AXIS = Chunk::SIZE / BRICK_SIZE;
+constexpr uint32_t LAST_OCCUPANCY_WORD_BITS = COARSE_CELL_COUNT % 32u;
 
-uint32_t getBrickIndex(uint32_t x, uint32_t y, uint32_t z) {
-    const uint32_t bx = x / BRICK_SIZE;
-    const uint32_t by = y / BRICK_SIZE;
-    const uint32_t bz = z / BRICK_SIZE;
+uint32_t brickMapIndexFromVoxel(uint32_t x, uint32_t y, uint32_t z) {
+    const uint32_t brickX = x / BRICK_SIZE;
+    const uint32_t brickY = y / BRICK_SIZE;
+    const uint32_t brickZ = z / BRICK_SIZE;
 
-    return bx +
-           by * BRICKS_PER_AXIS +
-           bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
+    return brickX +
+           brickY * Chunk::BRICKS_PER_AXIS +
+           brickZ * Chunk::BRICKS_PER_AXIS * Chunk::BRICKS_PER_AXIS;
+}
+
+uint32_t brickMapIndexFromBrickCoord(uint32_t brickX, uint32_t brickY, uint32_t brickZ) {
+    return brickX +
+           brickY * Chunk::BRICKS_PER_AXIS +
+           brickZ * Chunk::BRICKS_PER_AXIS * Chunk::BRICKS_PER_AXIS;
 }
 
 uint32_t coarseCellIndex(uint32_t x, uint32_t y, uint32_t z) {
-    return x +
-           COARSE_CELLS_PER_AXIS * (y + COARSE_CELLS_PER_AXIS * z);
+    return x + COARSE_CELLS_PER_AXIS * (y + COARSE_CELLS_PER_AXIS * z);
 }
 
-void recomputeOccupancyMask(Brick& brick) {
-    brick.occupancy_mask = 0u;
+BrickMapEntry makeBrickMapEntry(uint32_t materialId, uint32_t index = BRICK_MAP_EMPTY) {
+    return BrickMapEntry{index, static_cast<uint8_t>(materialId)}; //in-case we make materialId larger in the future
+}
 
-    for (uint32_t cz = 0; cz < COARSE_CELLS_PER_AXIS; cz++) {
-        for (uint32_t cy = 0; cy < COARSE_CELLS_PER_AXIS; cy++) {
-            for (uint32_t cx = 0; cx < COARSE_CELLS_PER_AXIS; cx++) {
-                bool occupied = false;
+bool hasExplicitBrick(const BrickMapEntry& entry) {
+    return entry.index != BRICK_MAP_EMPTY;
+}
 
-                for (uint32_t lz = 0; lz < COARSE_CELL_SIZE && !occupied; lz++) {
-                    for (uint32_t ly = 0; ly < COARSE_CELL_SIZE && !occupied; ly++) {
-                        for (uint32_t lx = 0; lx < COARSE_CELL_SIZE; lx++) {
-                            const uint32_t vx = cx * COARSE_CELL_SIZE + lx;
-                            const uint32_t vy = cy * COARSE_CELL_SIZE + ly;
-                            const uint32_t vz = cz * COARSE_CELL_SIZE + lz;
-                            if (brick.voxels[vx][vy][vz] != 0u) {
-                                occupied = true;
-                                break;
-                            }
-                        }
-                    }
-                }
+void setOccupancyBit(Brick& brick, uint32_t bitIndex) {
+    const uint32_t wordIndex = bitIndex / 32u;
+    const uint32_t bitInWord = bitIndex % 32u;
+    brick.occupancyMaskWords[wordIndex] |= 1u << bitInWord;
+}
 
-                if (occupied) {
-                    brick.occupancy_mask |= uint64_t{1} << coarseCellIndex(cx, cy, cz);
-                }
-            }
-        }
+void setAllOccupancyBits(Brick& brick) {
+    brick.occupancyMaskWords.fill(0xffffffffu);
+
+    if constexpr (LAST_OCCUPANCY_WORD_BITS != 0u) {
+        brick.occupancyMaskWords.back() = (1u << LAST_OCCUPANCY_WORD_BITS) - 1u;
     }
 }
 
-void fillBrick(Brick& brick, uint8_t value) {
-    for (uint32_t x = 0; x < BRICK_SIZE; x++) {
+bool isUniformBrickOccupancy(const Brick& brick, uint8_t occupancyValue) {
+    for (uint32_t z = 0; z < BRICK_SIZE; z++) {
         for (uint32_t y = 0; y < BRICK_SIZE; y++) {
-            for (uint32_t z = 0; z < BRICK_SIZE; z++) {
-                brick.voxels[x][y][z] = value;
+            for (uint32_t x = 0; x < BRICK_SIZE; x++) {
+                if (brick.voxels[x][y][z] != occupancyValue) {
+                    return false;
+                }
             }
         }
     }
 
-    recomputeOccupancyMask(brick);
+    return true;
 }
 }
 
@@ -69,59 +69,139 @@ Chunk::Chunk(glm::ivec3 inChunkCoordinate) : chunkCoordinate(inChunkCoordinate) 
 }
 
 uint32_t Chunk::get(uint32_t x, uint32_t y, uint32_t z) const {
-    const uint32_t encodedId = brickMap[getBrickIndex(x, y, z)];
-    if (encodedId < MATERIALS_COUNT) {
-        return encodedId;
+    const BrickMapEntry& entry = brickMap[brickMapIndexFromVoxel(x, y, z)];
+    if (!hasExplicitBrick(entry)) {
+        return entry.materialId;
     }
 
-    const Brick& brick = bricks[encodedId - MATERIALS_COUNT];
-    const uint32_t lx = x % BRICK_SIZE;
-    const uint32_t ly = y % BRICK_SIZE;
-    const uint32_t lz = z % BRICK_SIZE;
+    const Brick& brick = bricks[entry.index];
+    const uint32_t localX = x % BRICK_SIZE;
+    const uint32_t localY = y % BRICK_SIZE;
+    const uint32_t localZ = z % BRICK_SIZE;
 
-    return brick.voxels[lx][ly][lz];
+    return brick.voxels[localX][localY][localZ] != BRICK_EMPTY_VOXEL ? entry.materialId : AIR_MATERIAL;
 }
 
 void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
-    const uint32_t brickIndex = getBrickIndex(x, y, z);
-    const uint32_t encodedId = brickMap[brickIndex];
+    const uint32_t mapIndex = brickMapIndexFromVoxel(x, y, z);
+    BrickMapEntry& entry = brickMap[mapIndex];
+    const uint32_t localX = x % BRICK_SIZE;
+    const uint32_t localY = y % BRICK_SIZE;
+    const uint32_t localZ = z % BRICK_SIZE;
 
-    const uint32_t lx = x % BRICK_SIZE;
-    const uint32_t ly = y % BRICK_SIZE;
-    const uint32_t lz = z % BRICK_SIZE;
-
-    if (encodedId < MATERIALS_COUNT) {
-        if (encodedId == value) {
+    if (!hasExplicitBrick(entry)) {
+        if (entry.materialId == value) {
             return;
         }
 
         Brick brick{};
-        fillBrick(brick, static_cast<uint8_t>(encodedId));
-        brick.voxels[lx][ly][lz] = static_cast<uint8_t>(value);
+        fillBrick(brick, static_cast<uint8_t>(entry.materialId));
+        brick.voxels[localX][localY][localZ] = value != AIR_MATERIAL ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
         recomputeOccupancyMask(brick);
 
+        if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
+            entry = makeBrickMapEntry(AIR_MATERIAL);
+            return;
+        }
+        if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
+            entry = makeBrickMapEntry(value);
+            return;
+        }
+
+        const uint32_t explicitMaterialId = value != AIR_MATERIAL ? value : entry.materialId;
         bricks.push_back(brick);
-        brickMap[brickIndex] = MATERIALS_COUNT + static_cast<uint32_t>(bricks.size() - 1);
+        entry = makeBrickMapEntry(explicitMaterialId, static_cast<uint32_t>(bricks.size() - 1));
         return;
     }
 
-    Brick& brick = bricks[encodedId - MATERIALS_COUNT];
-    brick.voxels[lx][ly][lz] = static_cast<uint8_t>(value);
+    Brick& brick = bricks[entry.index];
+    brick.voxels[localX][localY][localZ] = value != AIR_MATERIAL ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
+    if (value != AIR_MATERIAL) {
+        entry.materialId = value;
+    }
     recomputeOccupancyMask(brick);
 
-    //if all voxels the same -> remove brick, save as id=materialId
+    if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
+        entry = makeBrickMapEntry(AIR_MATERIAL);
+    } else if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
+        entry = makeBrickMapEntry(entry.materialId);
+    }
+}
 
-    for (uint32_t x = 0; x < BRICK_SIZE; x++) {
-        for (uint32_t y = 0; y < BRICK_SIZE; y++) {
-            for (uint32_t z = 0; z < BRICK_SIZE; z++) {
-                if (brick.voxels[x][y][z] != value) return; 
-            }
-        }
+void Chunk::setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId) {
+    brickMap[brickMapIndexFromBrickCoord(brickX, brickY, brickZ)] = makeBrickMapEntry(materialId);
+}
+
+void Chunk::setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick) {
+    const uint32_t mapIndex = brickMapIndexFromBrickCoord(brickX, brickY, brickZ);
+
+    if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
+        brickMap[mapIndex] = makeBrickMapEntry(AIR_MATERIAL);
+        return;
     }
 
-    brickMap[brickIndex] = static_cast<uint8_t> (value);
+    if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
+        brickMap[mapIndex] = makeBrickMapEntry(materialId);
+        return;
+    }
+
+    bricks.push_back(brick);
+    brickMap[mapIndex] = makeBrickMapEntry(materialId, static_cast<uint32_t>(bricks.size() - 1));
 }
 
 void Chunk::clear() {
-    brickMap.fill(0u);
+    brickMap.fill(makeBrickMapEntry(AIR_MATERIAL));
+}
+
+void Chunk::reserveBrickPool(size_t brickCount) {
+    bricks.reserve(brickCount);
+}
+
+void Chunk::resetBrickPool() {
+    bricks.clear();
+}
+
+void Chunk::recomputeOccupancyMask(Brick& brick) {
+    brick.occupancyMaskWords.fill(0u);
+
+    for (uint32_t coarseZ = 0; coarseZ < COARSE_CELLS_PER_AXIS; coarseZ++) {
+        for (uint32_t coarseY = 0; coarseY < COARSE_CELLS_PER_AXIS; coarseY++) {
+            for (uint32_t coarseX = 0; coarseX < COARSE_CELLS_PER_AXIS; coarseX++) {
+                bool occupied = false;
+
+                for (uint32_t localZ = 0; localZ < COARSE_CELL_SIZE && !occupied; localZ++) {
+                    for (uint32_t localY = 0; localY < COARSE_CELL_SIZE && !occupied; localY++) {
+                        for (uint32_t localX = 0; localX < COARSE_CELL_SIZE; localX++) {
+                            const uint32_t voxelX = coarseX * COARSE_CELL_SIZE + localX;
+                            const uint32_t voxelY = coarseY * COARSE_CELL_SIZE + localY;
+                            const uint32_t voxelZ = coarseZ * COARSE_CELL_SIZE + localZ;
+                            if (brick.voxels[voxelX][voxelY][voxelZ] != BRICK_EMPTY_VOXEL) {
+                                occupied = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (occupied) {
+                    setOccupancyBit(brick, coarseCellIndex(coarseX, coarseY, coarseZ));
+                }
+            }
+        }
+    }
+}
+
+void Chunk::fillBrick(Brick& brick, uint8_t value) {
+    std::memset(
+        brick.voxels,
+        value == AIR_MATERIAL ? BRICK_EMPTY_VOXEL : BRICK_SOLID_VOXEL,
+        sizeof(brick.voxels)
+    );
+
+    if (value == AIR_MATERIAL) {
+        brick.occupancyMaskWords.fill(0u);
+        return;
+    }
+
+    setAllOccupancyBits(brick);
 }

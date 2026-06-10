@@ -1,8 +1,12 @@
 #pragma once
 
+#include "brick.hpp"
+#include "materials.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #define GLM_FORCE_RADIANS
@@ -10,43 +14,48 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 
-// huge note to self: first MATERIAL_COUNT indexes in the brick map stand for uniform-material bricks, past MATERIAL_COUNT
-// starts the actual indexing of the bricks array
+inline constexpr uint32_t BRICK_MAP_EMPTY = std::numeric_limits<uint32_t>::max();
+inline constexpr uint32_t PACKED_BRICK_MAP_ENTRY_WORD_COUNT = 2u;
 
-static constexpr uint32_t BRICK_SIZE = 8; // should be a divisor of SIZE
-static constexpr uint32_t BRICK_VOXEL_COUNT = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;
-static constexpr uint32_t COARSE_CELL_SIZE = 2;
-static constexpr uint32_t COARSE_CELLS_PER_AXIS = BRICK_SIZE / COARSE_CELL_SIZE;
-static constexpr uint32_t COARSE_CELL_COUNT = COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS;
-static constexpr uint32_t OCCUPANCY_MASK_WORD_COUNT = (COARSE_CELL_COUNT + 31u) / 32u;
-static constexpr uint32_t PACKED_BRICK_VOXEL_WORD_COUNT = (BRICK_VOXEL_COUNT + 3u) / 4u;
-static constexpr uint32_t PACKED_BRICK_WORD_COUNT = OCCUPANCY_MASK_WORD_COUNT + PACKED_BRICK_VOXEL_WORD_COUNT;
-
-struct Brick {
-    uint64_t occupancy_mask;
-    uint8_t voxels[BRICK_SIZE][BRICK_SIZE][BRICK_SIZE]{};
+struct BrickMapEntry {
+    uint32_t index = BRICK_MAP_EMPTY;
+    uint8_t materialId = AIR_MATERIAL;
 };
 
 class Chunk {
 public:
     static constexpr uint32_t SIZE = 128;
-    static constexpr size_t BRICK_COUNT = (size_t) (SIZE/BRICK_SIZE) * (SIZE/BRICK_SIZE) * (SIZE/BRICK_SIZE);
+    static constexpr uint32_t BRICKS_PER_AXIS = SIZE / BRICK_SIZE;
+    static constexpr size_t BRICK_COUNT = static_cast<size_t>(BRICKS_PER_AXIS) * BRICKS_PER_AXIS * BRICKS_PER_AXIS;
     static constexpr size_t VOXEL_COUNT = static_cast<size_t>(SIZE) * SIZE * SIZE;
+
+    static_assert(SIZE % BRICK_SIZE == 0, "Chunk::SIZE must be divisible by BRICK_SIZE");
+
+    using EncodedBrickMap = std::array<BrickMapEntry, BRICK_COUNT>;
 
     explicit Chunk(glm::ivec3 chunkCoordinate = glm::ivec3(0));
 
     uint32_t get(uint32_t x, uint32_t y, uint32_t z) const;
     void set(uint32_t x, uint32_t y, uint32_t z, uint32_t value);
+
+    void setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId);
+    void setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick);
     void clear();
 
     glm::ivec3 getChunkCoordinate() const { return chunkCoordinate; }
-    const std::array<uint32_t, BRICK_COUNT>& getBrickMap() const { return brickMap; }
+    const EncodedBrickMap& getBrickMap() const { return brickMap; }
+
     static const std::vector<Brick>& getBrickPool() { return bricks; }
+    static void reserveBrickPool(size_t brickCount);
+    static void resetBrickPool();
+    static void recomputeOccupancyMask(Brick& brick);
+    static void fillBrick(Brick& brick, uint8_t value);
 
 private:
     glm::ivec3 chunkCoordinate{};
+    EncodedBrickMap brickMap{};
 
-    //brickmap implementation
+    // Brick map entries always store a material id for uniform shading / LOD fallback.
+    // index == BRICK_MAP_EMPTY means no explicit brick pool entry is referenced.
     static std::vector<Brick> bricks;
-    std::array<uint32_t, BRICK_COUNT> brickMap{};
 };

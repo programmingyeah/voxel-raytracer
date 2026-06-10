@@ -23,23 +23,125 @@ layout(push_constant) uniform PushConstants {
 
 const float BIG = 1e30;
 const float EPS = 1e-4;
-const int BRICK_SIZE = 8;
 const int COARSE_CELL_SIZE = 2;
-const int COARSE_CELLS_PER_AXIS = BRICK_SIZE / COARSE_CELL_SIZE;
-const int COARSE_CELL_COUNT = COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS * COARSE_CELLS_PER_AXIS;
-const int OCCUPANCY_MASK_WORD_COUNT = (COARSE_CELL_COUNT + 31) / 32;
-const int PACKED_BRICK_VOXEL_WORD_COUNT = (BRICK_SIZE * BRICK_SIZE * BRICK_SIZE) / 4;
-const int PACKED_BRICK_WORD_COUNT = OCCUPANCY_MASK_WORD_COUNT + PACKED_BRICK_VOXEL_WORD_COUNT;
 const uint AIR_MATERIAL = 0u;
-const uint FULL_STONE_MATERIAL = 1u;
-const uint MATERIAL_COUNT = 2u;
+const uint STONE_MATERIAL = 1u;
+const uint BRICK_MAP_EMPTY = 0xFFFFFFFFu;
+const uint BRICK_MAP_ENTRY_WORD_COUNT = 2u;
+
+struct RayQueryCounters {
+    int chunkSteps;
+    int brickSteps;
+    int explicitBrickTests;
+    int coarseCellSteps;
+    int voxelTests;
+};
+
+void initRayQueryCounters(out RayQueryCounters counters) {
+    counters.chunkSteps = 0;
+    counters.brickSteps = 0;
+    counters.explicitBrickTests = 0;
+    counters.coarseCellSteps = 0;
+    counters.voxelTests = 0;
+}
+
+int debugVisualizationMode() {
+    return int(pc.renderParams.w + 0.5);
+}
+
+float debugVisualizationIntensity() {
+    return max(pc.renderParams.x, 0.001);
+}
+
+float normalizedLogCount(float value, float maxLogValue) {
+    return clamp(log2(1.0 + value * debugVisualizationIntensity()) / maxLogValue, 0.0, 1.0);
+}
+
+float rayQueryHeatValue(RayQueryCounters counters) {
+    float weightedCost =
+        0.35 * float(counters.chunkSteps) +
+        0.75 * float(counters.brickSteps) +
+        0.80 * float(counters.explicitBrickTests) +
+        0.60 * float(counters.coarseCellSteps) +
+        0.25 * float(counters.voxelTests);
+    return normalizedLogCount(weightedCost, 6.0);
+}
+
+vec3 heatPalette(float t) {
+    t = clamp(t, 0.0, 1.0);
+    if (t < 0.25) {
+        return mix(vec3(0.03, 0.03, 0.10), vec3(0.05, 0.35, 1.00), t / 0.25);
+    }
+    if (t < 0.50) {
+        return mix(vec3(0.05, 0.35, 1.00), vec3(0.00, 0.95, 0.70), (t - 0.25) / 0.25);
+    }
+    if (t < 0.75) {
+        return mix(vec3(0.00, 0.95, 0.70), vec3(1.00, 0.90, 0.15), (t - 0.50) / 0.25);
+    }
+    return mix(vec3(1.00, 0.90, 0.15), vec3(1.00, 0.12, 0.05), (t - 0.75) / 0.25);
+}
+
+vec3 rayQueryBreakdownColor(RayQueryCounters counters) {
+    float voxel = normalizedLogCount(float(counters.voxelTests), 4.5);
+    float sparse = normalizedLogCount(float(counters.brickSteps + counters.explicitBrickTests + counters.coarseCellSteps), 5.0);
+    float chunk = normalizedLogCount(float(counters.chunkSteps), 3.5);
+    return vec3(voxel, sparse, chunk);
+}
+
+vec3 applySurfaceQueryVisualization(vec3 litBaseColor, RayQueryCounters counters) {
+    int mode = debugVisualizationMode();
+    if (mode == 1) {
+        vec3 heatColor = heatPalette(rayQueryHeatValue(counters));
+        return mix(litBaseColor * 0.18, heatColor, 0.88);
+    }
+    if (mode == 2) {
+        return mix(litBaseColor * 0.18, rayQueryBreakdownColor(counters), 0.90);
+    }
+    return litBaseColor;
+}
+
+vec3 applySkyQueryVisualization(vec3 skyColor, RayQueryCounters counters) {
+    int mode = debugVisualizationMode();
+    if (mode == 1) {
+        return mix(skyColor * 0.35, heatPalette(rayQueryHeatValue(counters)), 0.75);
+    }
+    if (mode == 2) {
+        return mix(skyColor * 0.35, rayQueryBreakdownColor(counters), 0.75);
+    }
+    return skyColor;
+}
+
+int brickSize() {
+    return pc.worldDimensions.w;
+}
 
 int chunkSize() {
     return pc.chunkCounts.w;
 }
 
+int coarseCellsPerAxis() {
+    return brickSize() / COARSE_CELL_SIZE;
+}
+
+int coarseCellCount() {
+    int count = coarseCellsPerAxis();
+    return count * count * count;
+}
+
+int occupancyMaskWordCount() {
+    return (coarseCellCount() + 31) / 32;
+}
+
+int packedBrickVoxelWordCount() {
+    return (brickSize() * brickSize() * brickSize() + 3) / 4;
+}
+
+int packedBrickWordCount() {
+    return occupancyMaskWordCount() + packedBrickVoxelWordCount();
+}
+
 int bricksPerAxis() {
-    return chunkSize() / BRICK_SIZE;
+    return chunkSize() / brickSize();
 }
 
 int brickCount() {
@@ -70,6 +172,13 @@ vec3 stoneColor(ivec3 voxelPos) {
     return vec3(shade);
 }
 
+vec3 materialColor(uint materialId, ivec3 voxelPos) {
+    if (materialId == STONE_MATERIAL) {
+        return stoneColor(voxelPos);
+    }
+    return vec3(1.0, 0.0, 1.0);
+}
+
 vec3 applyGamma(vec3 color) {
     return pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
 }
@@ -97,34 +206,54 @@ int brickIndex(ivec3 brickCoord) {
     return brickCoord.x + count * (brickCoord.y + count * brickCoord.z);
 }
 
-uint loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
-    return chunkBrickMaps.data[chunkIndex(chunkCoord) * brickCount() + brickIndex(brickCoord)];
+uvec2 loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
+    uint packedEntryIndex = uint(chunkIndex(chunkCoord) * brickCount() + brickIndex(brickCoord)) * BRICK_MAP_ENTRY_WORD_COUNT;
+    return uvec2(
+        chunkBrickMaps.data[packedEntryIndex],
+        chunkBrickMaps.data[packedEntryIndex + 1u]
+    );
+}
+
+bool brickEntryHasBrick(uvec2 brickEntry) {
+    return brickEntry.x != BRICK_MAP_EMPTY;
+}
+
+uint brickEntryMaterialId(uvec2 brickEntry) {
+    return brickEntry.y;
+}
+
+uint brickEntryIndex(uvec2 brickEntry) {
+    return brickEntry.x;
 }
 
 int coarseCellIndex(ivec3 coarseCell) {
-    return coarseCell.x + COARSE_CELLS_PER_AXIS * (coarseCell.y + COARSE_CELLS_PER_AXIS * coarseCell.z);
+    int cellsPerAxis = coarseCellsPerAxis();
+    return coarseCell.x + cellsPerAxis * (coarseCell.y + cellsPerAxis * coarseCell.z);
 }
 
-bool brickHasAnyOccupancy(uint encodedId) {
-    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
-    uint brickBase = explicitBrickIndex * PACKED_BRICK_WORD_COUNT;
-    return (brickPool.data[brickBase] | brickPool.data[brickBase + 1u]) != 0u;
+bool brickHasAnyOccupancy(uint explicitBrickIndex) {
+    uint brickBase = explicitBrickIndex * uint(packedBrickWordCount());
+    for (int i = 0; i < occupancyMaskWordCount(); i++) {
+        if (brickPool.data[brickBase + uint(i)] != 0u) {
+            return true;
+        }
+    }
+    return false;
 }
 
-bool loadBrickCoarseOccupancy(uint encodedId, ivec3 coarseCell) {
-    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
-    uint brickBase = explicitBrickIndex * PACKED_BRICK_WORD_COUNT;
+bool loadBrickCoarseOccupancy(uint explicitBrickIndex, ivec3 coarseCell) {
+    uint brickBase = explicitBrickIndex * uint(packedBrickWordCount());
     uint bitIndex = uint(coarseCellIndex(coarseCell));
     uint word = brickPool.data[brickBase + bitIndex / 32u];
     return ((word >> (bitIndex & 31u)) & 1u) != 0u;
 }
 
-uint loadBrickVoxel(uint encodedId, ivec3 localVoxel) {
-    uint explicitBrickIndex = encodedId - MATERIAL_COUNT;
-    int flatIndex = localVoxel.x + BRICK_SIZE * (localVoxel.y + BRICK_SIZE * localVoxel.z);
+uint loadBrickVoxel(uint explicitBrickIndex, ivec3 localVoxel) {
+    int currentBrickSize = brickSize();
+    int flatIndex = localVoxel.x + currentBrickSize * (localVoxel.y + currentBrickSize * localVoxel.z);
     uint packed = brickPool.data[
-        explicitBrickIndex * PACKED_BRICK_WORD_COUNT +
-        uint(OCCUPANCY_MASK_WORD_COUNT) +
+        explicitBrickIndex * uint(packedBrickWordCount()) +
+        uint(occupancyMaskWordCount()) +
         uint(flatIndex / 4)
     ];
     return (packed >> (8 * (flatIndex & 3))) & 0xFFu;
@@ -133,7 +262,7 @@ uint loadBrickVoxel(uint encodedId, ivec3 localVoxel) {
 vec3 normalForAxis(int axis, int stepSign);
 int selectMinAxis(vec3 v);
 
-bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWorldMin, uint encodedId, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
+bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWorldMin, uint explicitBrickIndex, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
     if (endT <= startT + EPS) {
         return false;
     }
@@ -166,7 +295,8 @@ bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWo
         ivec3 localVoxelInCell = voxel - cellWorldMin;
         if (all(greaterThanEqual(localVoxelInCell, ivec3(0))) && all(lessThan(localVoxelInCell, ivec3(COARSE_CELL_SIZE)))) {
             ivec3 localVoxelInBrick = voxel - brickWorldMin;
-            if (loadBrickVoxel(encodedId, localVoxelInBrick) != AIR_MATERIAL) {
+            counters.voxelTests++;
+            if (loadBrickVoxel(explicitBrickIndex, localVoxelInBrick) != AIR_MATERIAL) {
                 hitT = t;
                 hitNormal = currentNormal;
                 return true;
@@ -247,8 +377,9 @@ bool intersectAabb(vec3 ro, vec3 rd, vec3 boundsMin, vec3 boundsMax, out float e
     return exitT > max(entryT, 0.0);
 }
 
-bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
-    if (endT <= startT + EPS || !brickHasAnyOccupancy(encodedId)) {
+bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint explicitBrickIndex, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
+    counters.explicitBrickTests++;
+    if (endT <= startT + EPS || !brickHasAnyOccupancy(explicitBrickIndex)) {
         return false;
     }
 
@@ -262,8 +393,9 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
 
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
+    int currentCoarseCellsPerAxis = coarseCellsPerAxis();
     ivec3 localCell = ivec3(floor((samplePos - vec3(brickWorldMin)) / float(COARSE_CELL_SIZE)));
-    localCell = clamp(localCell, ivec3(0), ivec3(COARSE_CELLS_PER_AXIS - 1));
+    localCell = clamp(localCell, ivec3(0), ivec3(currentCoarseCellsPerAxis - 1));
     vec3 currentNormal = entryNormal;
 
     vec3 nextBoundary = vec3(brickWorldMin) + vec3(
@@ -277,12 +409,13 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
         (nextBoundary.z - ro.z) * inv.z
     );
 
-    for (int i = 0; i < COARSE_CELL_COUNT; i++) {
+    for (int i = 0; i < coarseCellCount(); i++) {
+        counters.coarseCellSteps++;
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
-        if (loadBrickCoarseOccupancy(encodedId, localCell)) {
+        if (loadBrickCoarseOccupancy(explicitBrickIndex, localCell)) {
             ivec3 cellWorldMin = brickWorldMin + localCell * COARSE_CELL_SIZE;
-            if (traceOccupiedCoarseCell(ro, rd, brickWorldMin, cellWorldMin, encodedId, t, segmentEnd, currentNormal, hitT, hitNormal)) {
+            if (traceOccupiedCoarseCell(ro, rd, brickWorldMin, cellWorldMin, explicitBrickIndex, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
                 return true;
             }
         }
@@ -304,7 +437,7 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
             tMax.z += tDelta.z;
         }
 
-        if (any(lessThan(localCell, ivec3(0))) || any(greaterThanEqual(localCell, ivec3(COARSE_CELLS_PER_AXIS)))) {
+        if (any(lessThan(localCell, ivec3(0))) || any(greaterThanEqual(localCell, ivec3(currentCoarseCellsPerAxis)))) {
             break;
         }
 
@@ -315,7 +448,7 @@ bool traceExplicitBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint encodedId, f
     return false;
 }
 
-bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, out float hitT, out vec3 hitNormal) {
+bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
     if (endT <= startT + EPS) {
         return false;
     }
@@ -326,14 +459,15 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
         abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
     );
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(BRICK_SIZE) * inv);
+    int currentBrickSize = brickSize();
+    vec3 tDelta = abs(vec3(currentBrickSize) * inv);
 
     int currentChunkSize = chunkSize();
     int currentBricksPerAxis = bricksPerAxis();
     ivec3 chunkWorldMin = chunkCoord * currentChunkSize;
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE)));
+    ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(currentBrickSize)));
     localBrick = clamp(localBrick, ivec3(0), ivec3(currentBricksPerAxis - 1));
     vec3 currentNormal = entryNormal;
 
@@ -341,7 +475,7 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
         float(step.x > 0 ? localBrick.x + 1 : localBrick.x),
         float(step.y > 0 ? localBrick.y + 1 : localBrick.y),
         float(step.z > 0 ? localBrick.z + 1 : localBrick.z)
-    ) * float(BRICK_SIZE);
+    ) * float(currentBrickSize);
     vec3 tMax = vec3(
         (nextBoundary.x - ro.x) * inv.x,
         (nextBoundary.y - ro.y) * inv.y,
@@ -350,18 +484,21 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
 
     int maxBrickSteps = brickCount();
     for (int i = 0; i < maxBrickSteps; i++) {
-        uint entry = loadBrickEntry(chunkCoord, localBrick);
+        counters.brickSteps++;
+        uvec2 entry = loadBrickEntry(chunkCoord, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
-        if (entry == FULL_STONE_MATERIAL) {
-            hitT = t;
-            hitNormal = currentNormal;
-            return true;
-        }
-
-        if (entry >= MATERIAL_COUNT) {
-            ivec3 brickWorldMin = chunkWorldMin + localBrick * BRICK_SIZE;
-            if (traceExplicitBrick(ro, rd, brickWorldMin, entry, t, segmentEnd, currentNormal, hitT, hitNormal)) {
+        if (!brickEntryHasBrick(entry)) {
+            if (brickEntryMaterialId(entry) != AIR_MATERIAL) {
+                hitT = t;
+                hitNormal = currentNormal;
+                hitMaterialId = brickEntryMaterialId(entry);
+                return true;
+            }
+        } else {
+            ivec3 brickWorldMin = chunkWorldMin + localBrick * currentBrickSize;
+            if (traceExplicitBrick(ro, rd, brickWorldMin, brickEntryIndex(entry), t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+                hitMaterialId = brickEntryMaterialId(entry);
                 return true;
             }
         }
@@ -394,7 +531,7 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
     return false;
 }
 
-bool traceScene(vec3 ro, vec3 rd, float maxDistance, out float hitT, out vec3 hitNormal) {
+bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
     float worldEntryT = 0.0;
     float worldExitT = 0.0;
     vec3 worldEntryNormal = vec3(0.0);
@@ -436,8 +573,9 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, out float hitT, out vec3 hi
 
     int maxChunkSteps = pc.chunkCounts.x * pc.chunkCounts.y * pc.chunkCounts.z;
     for (int i = 0; i < maxChunkSteps; i++) {
+        counters.chunkSteps++;
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-        if (traceChunk(ro, rd, chunkCoord, t, segmentEnd, currentNormal, hitT, hitNormal)) {
+        if (traceChunk(ro, rd, chunkCoord, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
             return true;
         }
 
@@ -492,19 +630,25 @@ void main() {
     vec3 skyColor = addSun(backgroundColor(rd), rd, lightDir);
     vec3 color = skyColor;
 
+    RayQueryCounters counters;
+    initRayQueryCounters(counters);
+
     float hitT = 0.0;
     vec3 hitNormal = vec3(0.0);
-    if (traceScene(ro, rd, pc.renderParams.y, hitT, hitNormal)) {
+    uint hitMaterialId = AIR_MATERIAL;
+    if (traceScene(ro, rd, pc.renderParams.y, counters, hitT, hitNormal, hitMaterialId)) {
         vec3 shadingNormal = length(hitNormal) > 0.5 ? normalize(hitNormal) : normalize(-rd);
         vec3 hitPos = ro + rd * hitT;
         ivec3 voxelPos = ivec3(floor(hitPos - shadingNormal * 0.001));
 
-        vec3 baseColor = stoneColor(voxelPos);
+        vec3 baseColor = materialColor(hitMaterialId, voxelPos);
         float ambient = 0.22;
         float sun = max(dot(shadingNormal, lightDir), 0.0);
         float lighting = ambient + 0.78 * sun;
 
-        color = baseColor * lighting;
+        color = applySurfaceQueryVisualization(baseColor * lighting, counters);
+    } else {
+        color = applySkyQueryVisualization(skyColor, counters);
     }
 
     color = applyGamma(color);

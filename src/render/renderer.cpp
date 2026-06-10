@@ -320,6 +320,8 @@ void VulkanApp::createImGuiFramebuffers() {
 void VulkanApp::initImGui() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     ImGui::StyleColorsDark();
 
     ImGui_ImplGlfw_InitForVulkan(window, true);
@@ -445,6 +447,11 @@ void VulkanApp::buildDiagnosticsUi() {
     const std::string worldBufferSize = formatByteSize(worldBufferBytes);
     const std::string chunkMapBufferSize = formatByteSize(chunkBrickMapBuffer.size);
     const std::string brickPoolBufferSize = formatByteSize(brickPoolBuffer.size);
+    static const char* rayQueryVisualizationModes[] = {
+        "Off",
+        "Query heat",
+        "Hierarchy breakdown"
+    };
 
     ImGui::SetNextWindowBgAlpha(0.85f);
     ImGui::Begin("Diagnostics");
@@ -461,6 +468,16 @@ void VulkanApp::buildDiagnosticsUi() {
     ImGui::Text("World buffer VRAM: %s", worldBufferSize.c_str());
     ImGui::Text("Chunk map buffer: %s", chunkMapBufferSize.c_str());
     ImGui::Text("Brick pool buffer: %s", brickPoolBufferSize.c_str());
+    ImGui::Separator();
+    ImGui::Text("Ray query visualization");
+    ImGui::Combo(
+        "Mode",
+        &rayQueryVisualizationMode,
+        rayQueryVisualizationModes,
+        IM_ARRAYSIZE(rayQueryVisualizationModes)
+    );
+    ImGui::SliderFloat("Intensity", &rayQueryVisualizationIntensity, 0.25f, 4.0f, "%.2fx");
+    ImGui::TextWrapped("Heat shows weighted traversal cost. Breakdown colors surfaces by query source: red = voxel tests, green = sparse brick/coarse checks, blue = chunk traversal.");
     ImGui::End();
 }
 
@@ -605,7 +622,7 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         static_cast<int>(worldDimensions.x),
         static_cast<int>(worldDimensions.y),
         static_cast<int>(worldDimensions.z),
-        0
+        static_cast<int>(BRICK_SIZE)
     );
     pushConstants.chunkCounts = glm::ivec4(
         static_cast<int>(chunkCounts.x),
@@ -613,7 +630,12 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         static_cast<int>(chunkCounts.z),
         static_cast<int>(Chunk::SIZE)
     );
-    pushConstants.renderParams = glm::vec4(0.1f, static_cast<float>(glm::length(glm::vec3(worldDimensions))) * 2.0f, 1.4f, 0.0f);
+    pushConstants.renderParams = glm::vec4(
+        rayQueryVisualizationIntensity,
+        static_cast<float>(glm::length(glm::vec3(worldDimensions))) * 2.0f,
+        1.4f,
+        static_cast<float>(rayQueryVisualizationMode)
+    );
 
     vkCmdPushConstants(
         commandBuffer,
