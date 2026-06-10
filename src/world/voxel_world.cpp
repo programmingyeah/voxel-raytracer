@@ -1,8 +1,5 @@
 #include "voxel_world.hpp"
-
 #include "materials.hpp"
-
-#include <algorithm>
 #include <stdexcept>
 
 namespace {
