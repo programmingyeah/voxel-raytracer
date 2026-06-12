@@ -19,18 +19,29 @@ struct ComputePushConstants {
     glm::vec4 renderParams;
 };
 
-void uploadStorageBuffer(Instance& instance, Buffer& buffer, const std::vector<uint32_t>& data)
+VkDeviceSize storageBufferSize(const std::vector<uint32_t>& data)
 {
-    const VkDeviceSize bufferSize = sizeof(uint32_t) * static_cast<VkDeviceSize>(data.empty() ? 1 : data.size());
-    buffer.createBuffer(
+    return sizeof(uint32_t) * static_cast<VkDeviceSize>(data.empty() ? 1 : data.size());
+}
+
+void uploadBufferWithStaging(Instance& instance, CommandPool& commandPool, Buffer& destinationBuffer, const std::vector<uint32_t>& data)
+{
+    Buffer stagingBuffer{};
+    stagingBuffer.createBuffer(
         &instance,
-        bufferSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        destinationBuffer.size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
     );
 
     const uint32_t zero = 0;
-    buffer.upload(&instance, data.empty() ? static_cast<const void*>(&zero) : static_cast<const void*>(data.data()), bufferSize);
+    stagingBuffer.upload(
+        &instance,
+        data.empty() ? static_cast<const void*>(&zero) : static_cast<const void*>(data.data()),
+        destinationBuffer.size
+    );
+    Buffer::copyBuffer(&instance, stagingBuffer.buffer, destinationBuffer.buffer, destinationBuffer.size, commandPool);
+    stagingBuffer.cleanup(&instance);
 }
 
 void insertImageBarrier(
@@ -374,8 +385,24 @@ void VulkanApp::createWorldBuffers() {
     }
 
     const GpuVoxelBuffers gpuBuffers = world->buildGpuBuffers();
-    uploadStorageBuffer(instance, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
-    uploadStorageBuffer(instance, brickPoolBuffer, gpuBuffers.brickData);
+    const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
+    const VkDeviceSize brickPoolBufferSize = storageBufferSize(gpuBuffers.brickData);
+
+    chunkBrickMapBuffer.createBuffer(
+        &instance,
+        chunkBrickMapBufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+    brickPoolBuffer.createBuffer(
+        &instance,
+        brickPoolBufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+
+    uploadBufferWithStaging(instance, commandPool, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
+    uploadBufferWithStaging(instance, commandPool, brickPoolBuffer, gpuBuffers.brickData);
 }
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
