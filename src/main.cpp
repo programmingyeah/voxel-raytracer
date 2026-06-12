@@ -10,6 +10,7 @@
 namespace {
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
 constexpr float PLACE_VOXEL_STEP = 0.25f;
+constexpr float WORLD_STREAM_STEP_SECONDS = 10.0f;
 
 GLFWwindow* window = nullptr;
 VulkanApp renderer;
@@ -60,8 +61,9 @@ bool tryPlaceStoneVoxel(VoxelWorld& world, const Camera& camera) {
     return false;
 }
 
-void gameLoop(VoxelWorld& world, Camera& camera) {
+void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera) {
     auto previousTime = std::chrono::steady_clock::now();
+    float streamStepAccumulator = 0.0f;
     bool rightMousePressedLastFrame = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -71,6 +73,13 @@ void gameLoop(VoxelWorld& world, Camera& camera) {
 
         glfwPollEvents();
         camera.update(window, deltaTimeSeconds);
+
+        streamStepAccumulator += deltaTimeSeconds;
+        if (streamStepAccumulator >= WORLD_STREAM_STEP_SECONDS) {
+            streamStepAccumulator -= WORLD_STREAM_STEP_SECONDS;
+            const std::vector<uint32_t> enteringChunkWindowIndices = world.shiftChunkWindow(glm::ivec3(0, 0, 1));
+            renderer.setWorldStats(worldGenerator.generateTerrain(world, enteringChunkWindowIndices));
+        }
 
         const bool rightMousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         if (rightMousePressed && !rightMousePressedLastFrame) {
@@ -87,15 +96,15 @@ void gameLoop(VoxelWorld& world, Camera& camera) {
 
 int main() {
     try {
-        VoxelWorld world(glm::uvec3(6, 2, 6));
+        VoxelWorld world(glm::uvec3(5, 3, 5));
         WorldGenerator worldGenerator;
         const WorldGenerationStats worldStats = worldGenerator.generateTerrain(world);
 
-        Camera camera(glm::vec3(0.0f, 160.0f, 0.0f));
+        Camera camera(glm::vec3(320.0f, 160.0f, 256.0f));
         window = renderer.init(world, worldStats);
         camera.attachWindow(window);
 
-        gameLoop(world, camera);
+        gameLoop(world, worldGenerator, camera);
         renderer.cleanup();
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {

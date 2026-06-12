@@ -65,9 +65,13 @@ bool isUniformBrickOccupancy(const Brick& brick, uint8_t occupancyValue) {
 }
 }
 
-Chunk::Chunk(glm::ivec3 inChunkCoordinate, size_t inChunkIndex)
-    : chunkCoordinate(inChunkCoordinate), chunkIndex(inChunkIndex) {
+Chunk::Chunk(glm::ivec3 inChunkCoordinate, size_t inChunkSlotIndex)
+    : chunkCoordinate(inChunkCoordinate), chunkSlotIndex(inChunkSlotIndex) {
     clear();
+}
+
+uint32_t Chunk::explicitBrickIndex(uint32_t mapIndex) const {
+    return static_cast<uint32_t>(chunkSlotIndex * BRICK_COUNT + mapIndex);
 }
 
 uint32_t Chunk::get(uint32_t x, uint32_t y, uint32_t z) const {
@@ -113,8 +117,8 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
         }
 
         const uint32_t explicitMaterialId = value != AIR_MATERIAL ? value : entry.materialId;
-        bricks.push_back(brick);
-        const uint32_t brickIndex = static_cast<uint32_t>(bricks.size() - 1);
+        const uint32_t brickIndex = explicitBrickIndex(mapIndex);
+        bricks.at(brickIndex) = brick;
         entry = makeBrickMapEntry(explicitMaterialId, brickIndex);
         markBrickMapDirty(mapIndex);
         markBrickPoolDirty(brickIndex);
@@ -162,8 +166,8 @@ void Chunk::setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, 
         return;
     }
 
-    bricks.push_back(brick);
-    const uint32_t brickIndex = static_cast<uint32_t>(bricks.size() - 1);
+    const uint32_t brickIndex = explicitBrickIndex(mapIndex);
+    bricks.at(brickIndex) = brick;
     brickMap[mapIndex] = makeBrickMapEntry(materialId, brickIndex);
     markBrickMapDirty(mapIndex);
     markBrickPoolDirty(brickIndex);
@@ -182,12 +186,8 @@ void Chunk::setDirtyCallbacks(
     brickPoolDirtyCallback = std::move(inBrickPoolDirtyCallback);
 }
 
-void Chunk::reserveBrickPool(size_t brickCount) {
-    bricks.reserve(brickCount);
-}
-
-void Chunk::resetBrickPool() {
-    bricks.clear();
+void Chunk::initializeBrickPool(size_t chunkSlotCount) {
+    bricks.assign(chunkSlotCount * BRICK_COUNT, Brick{});
 }
 
 void Chunk::recomputeOccupancyMask(Brick& brick) {
@@ -222,7 +222,7 @@ void Chunk::recomputeOccupancyMask(Brick& brick) {
 
 void Chunk::markBrickMapDirty(uint32_t mapIndex) {
     if (chunkBrickMapDirtyCallback) {
-        chunkBrickMapDirtyCallback(chunkIndex, mapIndex);
+        chunkBrickMapDirtyCallback(chunkSlotIndex, mapIndex);
     }
 }
 
@@ -232,7 +232,7 @@ void Chunk::markWholeChunkDirty() {
     }
 
     for (uint32_t mapIndex = 0; mapIndex < BRICK_COUNT; mapIndex++) {
-        chunkBrickMapDirtyCallback(chunkIndex, mapIndex);
+        chunkBrickMapDirtyCallback(chunkSlotIndex, mapIndex);
     }
 }
 

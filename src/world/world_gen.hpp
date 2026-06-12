@@ -3,6 +3,7 @@
 #include "voxel_world.hpp"
 
 #include <cstdint>
+#include <vector>
 
 struct WorldGenerationStats {
     uint64_t solidVoxelCount = 0;
@@ -13,4 +14,5 @@ struct WorldGenerationStats {
 class WorldGenerator {
 public:
     WorldGenerationStats generateTerrain(VoxelWorld& world) const;
+    WorldGenerationStats generateTerrain(VoxelWorld& world, const std::vector<uint32_t>& localChunkWindowIndices) const;
 };

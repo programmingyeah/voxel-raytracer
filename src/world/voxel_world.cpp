@@ -1,15 +1,12 @@
 #include "voxel_world.hpp"
-#include "materials.hpp"
 #include <algorithm>
+#include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <utility>
 
 namespace {
-size_t voxelIndex(const glm::uvec3& dimensions, uint32_t x, uint32_t y, uint32_t z) {
-    return static_cast<size_t>(x) +
-           static_cast<size_t>(dimensions.x) *
-               (static_cast<size_t>(y) + static_cast<size_t>(dimensions.y) * static_cast<size_t>(z));
-}
+constexpr uint32_t INVALID_CHUNK_SLOT = std::numeric_limits<uint32_t>::max();
 
 void packBrick(std::vector<uint32_t>& brickData, size_t brickIndex, const Brick& brick) {
     const size_t brickBaseIndex = brickIndex * PACKED_BRICK_WORD_COUNT;
@@ -69,14 +66,18 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
     }
 
     const size_t totalChunkCount = static_cast<size_t>(chunkCounts.x) * chunkCounts.y * chunkCounts.z;
+    Chunk::initializeBrickPool(totalChunkCount);
     chunks.reserve(totalChunkCount);
+    chunkWindowIndices.resize(totalChunkCount);
+    std::iota(chunkWindowIndices.begin(), chunkWindowIndices.end(), 0u);
+    chunkSlotSolidVoxelCounts.assign(totalChunkCount, 0u);
 
     for (uint32_t z = 0; z < chunkCounts.z; z++) {
         for (uint32_t y = 0; y < chunkCounts.y; y++) {
             for (uint32_t x = 0; x < chunkCounts.x; x++) {
                 const size_t currentChunkIndex = chunks.size();
                 chunks.emplace_back(
-                    glm::ivec3(static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)),
+                    chunkOrigin + glm::ivec3(static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)),
                     currentChunkIndex
                 );
                 chunks.back().setDirtyCallbacks(
@@ -91,48 +92,137 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
         }
     }
 
+    dirtyChunkWindowIndices.assign(chunkWindowIndices.size(), 0u);
     dirtyChunkBrickMapEntries.assign(chunks.size() * Chunk::BRICK_COUNT, 0u);
+    dirtyBrickPoolEntries.assign(Chunk::getBrickPool().size(), 0u);
 }
 
 Chunk& VoxelWorld::getChunk(uint32_t x, uint32_t y, uint32_t z) {
-    return chunks.at(chunkIndex(x, y, z));
+    return getChunkByWindowIndex(chunkIndex(x, y, z));
 }
 
 const Chunk& VoxelWorld::getChunk(uint32_t x, uint32_t y, uint32_t z) const {
-    return chunks.at(chunkIndex(x, y, z));
+    return getChunkByWindowIndex(chunkIndex(x, y, z));
+}
+
+Chunk& VoxelWorld::getChunkByWindowIndex(size_t localWindowIndex) {
+    return chunks.at(chunkWindowIndices.at(localWindowIndex));
+}
+
+const Chunk& VoxelWorld::getChunkByWindowIndex(size_t localWindowIndex) const {
+    return chunks.at(chunkWindowIndices.at(localWindowIndex));
 }
 
 bool VoxelWorld::containsVoxel(int32_t x, int32_t y, int32_t z) const {
+    const glm::ivec3 voxelMin = getVoxelMin();
     const glm::uvec3 dimensions = getVoxelDimensions();
-    return x >= 0 && y >= 0 && z >= 0 &&
-           static_cast<uint32_t>(x) < dimensions.x &&
-           static_cast<uint32_t>(y) < dimensions.y &&
-           static_cast<uint32_t>(z) < dimensions.z;
+    return x >= voxelMin.x &&
+           y >= voxelMin.y &&
+           z >= voxelMin.z &&
+           x < voxelMin.x + static_cast<int32_t>(dimensions.x) &&
+           y < voxelMin.y + static_cast<int32_t>(dimensions.y) &&
+           z < voxelMin.z + static_cast<int32_t>(dimensions.z);
 }
 
 uint32_t VoxelWorld::getVoxel(uint32_t x, uint32_t y, uint32_t z) const {
-    const uint32_t chunkX = x / Chunk::SIZE;
-    const uint32_t chunkY = y / Chunk::SIZE;
-    const uint32_t chunkZ = z / Chunk::SIZE;
+    const glm::ivec3 voxelMin = getVoxelMin();
+    const uint32_t localX = static_cast<uint32_t>(static_cast<int32_t>(x) - voxelMin.x);
+    const uint32_t localY = static_cast<uint32_t>(static_cast<int32_t>(y) - voxelMin.y);
+    const uint32_t localZ = static_cast<uint32_t>(static_cast<int32_t>(z) - voxelMin.z);
+    const uint32_t chunkX = localX / Chunk::SIZE;
+    const uint32_t chunkY = localY / Chunk::SIZE;
+    const uint32_t chunkZ = localZ / Chunk::SIZE;
 
     return getChunk(chunkX, chunkY, chunkZ).get(
-        x % Chunk::SIZE,
-        y % Chunk::SIZE,
-        z % Chunk::SIZE
+        localX % Chunk::SIZE,
+        localY % Chunk::SIZE,
+        localZ % Chunk::SIZE
     );
 }
 
 void VoxelWorld::setVoxel(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
-    const uint32_t chunkX = x / Chunk::SIZE;
-    const uint32_t chunkY = y / Chunk::SIZE;
-    const uint32_t chunkZ = z / Chunk::SIZE;
+    const glm::ivec3 voxelMin = getVoxelMin();
+    const uint32_t localX = static_cast<uint32_t>(static_cast<int32_t>(x) - voxelMin.x);
+    const uint32_t localY = static_cast<uint32_t>(static_cast<int32_t>(y) - voxelMin.y);
+    const uint32_t localZ = static_cast<uint32_t>(static_cast<int32_t>(z) - voxelMin.z);
+    const uint32_t chunkX = localX / Chunk::SIZE;
+    const uint32_t chunkY = localY / Chunk::SIZE;
+    const uint32_t chunkZ = localZ / Chunk::SIZE;
 
     getChunk(chunkX, chunkY, chunkZ).set(
-        x % Chunk::SIZE,
-        y % Chunk::SIZE,
-        z % Chunk::SIZE,
+        localX % Chunk::SIZE,
+        localY % Chunk::SIZE,
+        localZ % Chunk::SIZE,
         value
     );
+}
+
+std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
+    if (deltaChunks == glm::ivec3(0)) {
+        return {};
+    }
+
+    const glm::ivec3 newChunkOrigin = chunkOrigin + deltaChunks;
+    std::vector<uint32_t> nextChunkWindowIndices(chunkWindowIndices.size(), INVALID_CHUNK_SLOT);
+    std::vector<uint32_t> recycledChunkSlots;
+    std::vector<uint32_t> enteringWindowIndices;
+
+    recycledChunkSlots.reserve(chunkWindowIndices.size());
+    enteringWindowIndices.reserve(chunkWindowIndices.size());
+
+    for (size_t localWindowIndex = 0; localWindowIndex < chunkWindowIndices.size(); localWindowIndex++) {
+        const glm::uvec3 localChunkCoord = chunkCoordFromWindowIndex(localWindowIndex);
+        const glm::ivec3 worldChunkCoord = chunkOrigin + glm::ivec3(localChunkCoord);
+        const glm::ivec3 nextLocalChunkCoord = worldChunkCoord - newChunkOrigin;
+
+        if (nextLocalChunkCoord.x >= 0 && nextLocalChunkCoord.y >= 0 && nextLocalChunkCoord.z >= 0 &&
+            nextLocalChunkCoord.x < static_cast<int32_t>(chunkCounts.x) &&
+            nextLocalChunkCoord.y < static_cast<int32_t>(chunkCounts.y) &&
+            nextLocalChunkCoord.z < static_cast<int32_t>(chunkCounts.z)) {
+            const size_t nextLocalWindowIndex = chunkIndex(
+                static_cast<uint32_t>(nextLocalChunkCoord.x),
+                static_cast<uint32_t>(nextLocalChunkCoord.y),
+                static_cast<uint32_t>(nextLocalChunkCoord.z)
+            );
+            nextChunkWindowIndices[nextLocalWindowIndex] = chunkWindowIndices[localWindowIndex];
+        } else {
+            recycledChunkSlots.push_back(chunkWindowIndices[localWindowIndex]);
+        }
+    }
+
+    for (size_t localWindowIndex = 0; localWindowIndex < nextChunkWindowIndices.size(); localWindowIndex++) {
+        if (nextChunkWindowIndices[localWindowIndex] != INVALID_CHUNK_SLOT) {
+            continue;
+        }
+
+        if (recycledChunkSlots.empty()) {
+            throw std::runtime_error("chunk window shift ran out of recyclable chunk slots");
+        }
+
+        const uint32_t recycledChunkSlot = recycledChunkSlots.back();
+        recycledChunkSlots.pop_back();
+        nextChunkWindowIndices[localWindowIndex] = recycledChunkSlot;
+        chunks[recycledChunkSlot].setChunkCoordinate(newChunkOrigin + glm::ivec3(chunkCoordFromWindowIndex(localWindowIndex)));
+        enteringWindowIndices.push_back(static_cast<uint32_t>(localWindowIndex));
+    }
+
+    for (size_t localWindowIndex = 0; localWindowIndex < chunkWindowIndices.size(); localWindowIndex++) {
+        if (chunkWindowIndices[localWindowIndex] != nextChunkWindowIndices[localWindowIndex]) {
+            dirtyChunkWindowIndices[localWindowIndex] = 1u;
+        }
+    }
+
+    chunkWindowIndices = std::move(nextChunkWindowIndices);
+    chunkOrigin = newChunkOrigin;
+    return enteringWindowIndices;
+}
+
+glm::ivec3 VoxelWorld::getVoxelMin() const {
+    return chunkOrigin * static_cast<int32_t>(Chunk::SIZE);
+}
+
+glm::ivec3 VoxelWorld::getVoxelMax() const {
+    return getVoxelMin() + glm::ivec3(getVoxelDimensions());
 }
 
 glm::uvec3 VoxelWorld::getVoxelDimensions() const {
@@ -142,6 +232,7 @@ glm::uvec3 VoxelWorld::getVoxelDimensions() const {
 GpuVoxelBuffers VoxelWorld::buildGpuBuffers() const {
     GpuVoxelBuffers gpuBuffers;
 
+    gpuBuffers.chunkWindowIndices = chunkWindowIndices;
     gpuBuffers.chunkBrickMaps.resize(chunks.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT);
     for (size_t chunkIndex = 0; chunkIndex < chunks.size(); chunkIndex++) {
         const auto& brickMap = chunks[chunkIndex].getBrickMap();
@@ -165,8 +256,23 @@ GpuVoxelBuffers VoxelWorld::buildGpuBuffers() const {
 
 GpuWorldDiff VoxelWorld::buildGpuBufferDiffs() {
     GpuWorldDiff worldDiff{};
+    worldDiff.chunkWindowIndices.totalWordCount = chunkWindowIndices.size();
     worldDiff.chunkBrickMaps.totalWordCount = chunks.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
     worldDiff.brickData.totalWordCount = Chunk::getBrickPool().size() * PACKED_BRICK_WORD_COUNT;
+
+    const std::vector<std::pair<size_t, size_t>> dirtyChunkWindowSpans = buildDirtySpans(dirtyChunkWindowIndices);
+    for (const auto& span : dirtyChunkWindowSpans) {
+        const size_t spanStartIndex = span.first;
+        const size_t spanIndexCount = span.second;
+        const size_t srcWordOffset = worldDiff.chunkWindowIndices.data.size();
+
+        worldDiff.chunkWindowIndices.data.insert(
+            worldDiff.chunkWindowIndices.data.end(),
+            chunkWindowIndices.begin() + static_cast<std::ptrdiff_t>(spanStartIndex),
+            chunkWindowIndices.begin() + static_cast<std::ptrdiff_t>(spanStartIndex + spanIndexCount)
+        );
+        worldDiff.chunkWindowIndices.regions.push_back({srcWordOffset, spanStartIndex, spanIndexCount});
+    }
 
     const std::vector<std::pair<size_t, size_t>> dirtyChunkSpans = buildDirtySpans(dirtyChunkBrickMapEntries);
     for (const auto& span : dirtyChunkSpans) {
@@ -213,40 +319,8 @@ GpuWorldDiff VoxelWorld::buildGpuBufferDiffs() {
     return worldDiff;
 }
 
-std::vector<uint32_t> VoxelWorld::buildVoxelBuffer() const {
-    const glm::uvec3 voxelDimensions = getVoxelDimensions();
-    std::vector<uint32_t> voxels(
-        static_cast<size_t>(voxelDimensions.x) * voxelDimensions.y * voxelDimensions.z,
-        AIR_MATERIAL
-    );
-
-    for (uint32_t chunkZ = 0; chunkZ < chunkCounts.z; chunkZ++) {
-        for (uint32_t chunkY = 0; chunkY < chunkCounts.y; chunkY++) {
-            for (uint32_t chunkX = 0; chunkX < chunkCounts.x; chunkX++) {
-                const Chunk& chunk = getChunk(chunkX, chunkY, chunkZ);
-
-                for (uint32_t localZ = 0; localZ < Chunk::SIZE; localZ++) {
-                    for (uint32_t localY = 0; localY < Chunk::SIZE; localY++) {
-                        for (uint32_t localX = 0; localX < Chunk::SIZE; localX++) {
-                            const glm::uvec3 worldPos(
-                                chunkX * Chunk::SIZE + localX,
-                                chunkY * Chunk::SIZE + localY,
-                                chunkZ * Chunk::SIZE + localZ
-                            );
-
-                            voxels[voxelIndex(voxelDimensions, worldPos.x, worldPos.y, worldPos.z)] =
-                                chunk.get(localX, localY, localZ);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return voxels;
-}
-
 void VoxelWorld::clearDirtyState() {
+    std::fill(dirtyChunkWindowIndices.begin(), dirtyChunkWindowIndices.end(), 0u);
     std::fill(dirtyChunkBrickMapEntries.begin(), dirtyChunkBrickMapEntries.end(), 0u);
     std::fill(dirtyBrickPoolEntries.begin(), dirtyBrickPoolEntries.end(), 0u);
 }
@@ -262,10 +336,18 @@ void VoxelWorld::onChunkBrickMapDirty(size_t dirtyChunkIndex, uint32_t mapIndex)
 
 void VoxelWorld::onBrickPoolDirty(uint32_t brickIndex) {
     if (brickIndex >= dirtyBrickPoolEntries.size()) {
-        dirtyBrickPoolEntries.resize(static_cast<size_t>(brickIndex) + 1u, 0u);
+        return;
     }
 
     dirtyBrickPoolEntries[brickIndex] = 1u;
+}
+
+void VoxelWorld::setChunkSolidVoxelCountByWindowIndex(size_t localWindowIndex, uint64_t solidVoxelCount) {
+    chunkSlotSolidVoxelCounts.at(chunkWindowIndices.at(localWindowIndex)) = solidVoxelCount;
+}
+
+uint64_t VoxelWorld::getTotalSolidVoxelCount() const {
+    return std::accumulate(chunkSlotSolidVoxelCounts.begin(), chunkSlotSolidVoxelCounts.end(), uint64_t{0});
 }
 
 size_t VoxelWorld::chunkIndex(uint32_t x, uint32_t y, uint32_t z) const {
@@ -276,4 +358,13 @@ size_t VoxelWorld::chunkIndex(uint32_t x, uint32_t y, uint32_t z) const {
     return static_cast<size_t>(x) +
            static_cast<size_t>(chunkCounts.x) *
                (static_cast<size_t>(y) + static_cast<size_t>(chunkCounts.y) * static_cast<size_t>(z));
+}
+
+glm::uvec3 VoxelWorld::chunkCoordFromWindowIndex(size_t localWindowIndex) const {
+    const size_t layerSize = static_cast<size_t>(chunkCounts.x) * chunkCounts.y;
+    const uint32_t z = static_cast<uint32_t>(localWindowIndex / layerSize);
+    const size_t remainderAfterZ = localWindowIndex % layerSize;
+    const uint32_t y = static_cast<uint32_t>(remainderAfterZ / chunkCounts.x);
+    const uint32_t x = static_cast<uint32_t>(remainderAfterZ % chunkCounts.x);
+    return glm::uvec3(x, y, z);
 }

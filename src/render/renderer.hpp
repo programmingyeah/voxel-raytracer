@@ -22,6 +22,7 @@
 class VulkanApp {
 public:
     GLFWwindow* init(VoxelWorld& world, const WorldGenerationStats& worldStats);
+    void setWorldStats(const WorldGenerationStats& inWorldStats) { worldStats = inWorldStats; }
     void drawFrame(const Camera& camera);
     void cleanup();
 
@@ -37,6 +38,7 @@ private:
     std::vector<bool> computeImagesInitialized;
     std::vector<VkImageView> swapchainImageViews;
     std::vector<VkFramebuffer> imguiFramebuffers;
+    Buffer chunkWindowIndexBuffer{};
     Buffer chunkBrickMapBuffer{};
     Buffer brickPoolBuffer{};
     SyncManager syncManager;

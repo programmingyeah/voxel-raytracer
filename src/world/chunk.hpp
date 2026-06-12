@@ -37,7 +37,7 @@ public:
 
     using EncodedBrickMap = std::array<BrickMapEntry, BRICK_COUNT>;
 
-    explicit Chunk(glm::ivec3 chunkCoordinate = glm::ivec3(0), size_t chunkIndex = 0);
+    explicit Chunk(glm::ivec3 chunkCoordinate = glm::ivec3(0), size_t chunkSlotIndex = 0);
 
     uint32_t get(uint32_t x, uint32_t y, uint32_t z) const;
     void set(uint32_t x, uint32_t y, uint32_t z, uint32_t value);
@@ -51,21 +51,22 @@ public:
     );
 
     glm::ivec3 getChunkCoordinate() const { return chunkCoordinate; }
+    void setChunkCoordinate(glm::ivec3 inChunkCoordinate) { chunkCoordinate = inChunkCoordinate; }
     const EncodedBrickMap& getBrickMap() const { return brickMap; }
 
     static const std::vector<Brick>& getBrickPool() { return bricks; }
-    static void reserveBrickPool(size_t brickCount);
-    static void resetBrickPool();
+    static void initializeBrickPool(size_t chunkSlotCount);
     static void recomputeOccupancyMask(Brick& brick);
     static void fillBrick(Brick& brick, uint8_t value);
 
 private:
+    uint32_t explicitBrickIndex(uint32_t mapIndex) const;
     void markBrickMapDirty(uint32_t mapIndex);
     void markWholeChunkDirty();
     void markBrickPoolDirty(uint32_t brickIndex);
 
     glm::ivec3 chunkCoordinate{};
-    size_t chunkIndex = 0;
+    size_t chunkSlotIndex = 0;
     EncodedBrickMap brickMap{};
     ChunkBrickMapDirtyCallback chunkBrickMapDirtyCallback;
     BrickPoolDirtyCallback brickPoolDirtyCallback;

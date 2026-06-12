@@ -3,11 +3,15 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(binding = 0, rgba8) uniform writeonly image2D destImage;
 
-layout(std430, binding = 1) readonly buffer ChunkBrickMaps {
+layout(std430, binding = 1) readonly buffer ChunkWindowIndices {
+    uint data[];
+} chunkWindowIndices;
+
+layout(std430, binding = 2) readonly buffer ChunkBrickMaps {
     uint data[];
 } chunkBrickMaps;
 
-layout(std430, binding = 2) readonly buffer BrickPool {
+layout(std430, binding = 3) readonly buffer BrickPool {
     uint data[];
 } brickPool;
 
@@ -16,8 +20,9 @@ layout(push_constant) uniform PushConstants {
     vec4 cameraForward;
     vec4 cameraRight;
     vec4 cameraUp;
-    ivec4 worldDimensions;
-    ivec4 chunkCounts;
+    ivec4 worldMin;
+    ivec4 worldMax;
+    ivec4 chunkWindowDimensions;
     vec4 renderParams;
 } pc;
 
@@ -112,11 +117,11 @@ vec3 applySkyQueryVisualization(vec3 skyColor, RayQueryCounters counters) {
 }
 
 int brickSize() {
-    return pc.worldDimensions.w;
+    return pc.worldMin.w;
 }
 
 int chunkSize() {
-    return pc.chunkCounts.w;
+    return pc.worldMax.w;
 }
 
 int coarseCellsPerAxis() {
@@ -183,22 +188,34 @@ vec3 applyGamma(vec3 color) {
     return pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 
+ivec3 worldVoxelMin() {
+    return pc.worldMin.xyz;
+}
+
+ivec3 worldVoxelMax() {
+    return pc.worldMax.xyz;
+}
+
+ivec3 worldChunkMin() {
+    return worldVoxelMin() / chunkSize();
+}
+
 bool inWorldBounds(ivec3 p) {
-    return p.x >= 0 && p.y >= 0 && p.z >= 0 &&
-           p.x < pc.worldDimensions.x &&
-           p.y < pc.worldDimensions.y &&
-           p.z < pc.worldDimensions.z;
+    ivec3 boundsMin = worldVoxelMin();
+    ivec3 boundsMax = worldVoxelMax();
+    return p.x >= boundsMin.x && p.y >= boundsMin.y && p.z >= boundsMin.z &&
+           p.x < boundsMax.x && p.y < boundsMax.y && p.z < boundsMax.z;
 }
 
 bool inChunkBounds(ivec3 chunkCoord) {
-    return chunkCoord.x >= 0 && chunkCoord.y >= 0 && chunkCoord.z >= 0 &&
-           chunkCoord.x < pc.chunkCounts.x &&
-           chunkCoord.y < pc.chunkCounts.y &&
-           chunkCoord.z < pc.chunkCounts.z;
+    ivec3 boundsMin = worldChunkMin();
+    ivec3 boundsMax = boundsMin + pc.chunkWindowDimensions.xyz;
+    return chunkCoord.x >= boundsMin.x && chunkCoord.y >= boundsMin.y && chunkCoord.z >= boundsMin.z &&
+           chunkCoord.x < boundsMax.x && chunkCoord.y < boundsMax.y && chunkCoord.z < boundsMax.z;
 }
 
-int chunkIndex(ivec3 chunkCoord) {
-    return chunkCoord.x + pc.chunkCounts.x * (chunkCoord.y + pc.chunkCounts.y * chunkCoord.z);
+int chunkIndex(ivec3 localChunkCoord) {
+    return localChunkCoord.x + pc.chunkWindowDimensions.x * (localChunkCoord.y + pc.chunkWindowDimensions.y * localChunkCoord.z);
 }
 
 int brickIndex(ivec3 brickCoord) {
@@ -206,8 +223,9 @@ int brickIndex(ivec3 brickCoord) {
     return brickCoord.x + count * (brickCoord.y + count * brickCoord.z);
 }
 
-uvec2 loadBrickEntry(ivec3 chunkCoord, ivec3 brickCoord) {
-    uint packedEntryIndex = uint(chunkIndex(chunkCoord) * brickCount() + brickIndex(brickCoord)) * BRICK_MAP_ENTRY_WORD_COUNT;
+uvec2 loadBrickEntry(ivec3 localChunkCoord, ivec3 brickCoord) {
+    uint chunkPoolIndex = chunkWindowIndices.data[chunkIndex(localChunkCoord)];
+    uint packedEntryIndex = (chunkPoolIndex * uint(brickCount()) + uint(brickIndex(brickCoord))) * BRICK_MAP_ENTRY_WORD_COUNT;
     return uvec2(
         chunkBrickMaps.data[packedEntryIndex],
         chunkBrickMaps.data[packedEntryIndex + 1u]
@@ -465,6 +483,7 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
     int currentChunkSize = chunkSize();
     int currentBricksPerAxis = bricksPerAxis();
     ivec3 chunkWorldMin = chunkCoord * currentChunkSize;
+    ivec3 localChunkCoord = chunkCoord - worldChunkMin();
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
     ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(currentBrickSize)));
@@ -485,7 +504,7 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
     int maxBrickSteps = brickCount();
     for (int i = 0; i < maxBrickSteps; i++) {
         counters.brickSteps++;
-        uvec2 entry = loadBrickEntry(chunkCoord, localBrick);
+        uvec2 entry = loadBrickEntry(localChunkCoord, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
         if (!brickEntryHasBrick(entry)) {
@@ -535,7 +554,9 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters coun
     float worldEntryT = 0.0;
     float worldExitT = 0.0;
     vec3 worldEntryNormal = vec3(0.0);
-    if (!intersectAabb(ro, rd, vec3(0.0), vec3(pc.worldDimensions.xyz), worldEntryT, worldExitT, worldEntryNormal)) {
+    vec3 boundsMin = vec3(worldVoxelMin());
+    vec3 boundsMax = vec3(worldVoxelMax());
+    if (!intersectAabb(ro, rd, boundsMin, boundsMax, worldEntryT, worldExitT, worldEntryNormal)) {
         return false;
     }
 
@@ -557,7 +578,9 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters coun
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
     ivec3 chunkCoord = ivec3(floor(samplePos / float(currentChunkSize)));
-    chunkCoord = clamp(chunkCoord, ivec3(0), pc.chunkCounts.xyz - ivec3(1));
+    ivec3 chunkBoundsMin = worldChunkMin();
+    ivec3 chunkBoundsMax = chunkBoundsMin + pc.chunkWindowDimensions.xyz - ivec3(1);
+    chunkCoord = clamp(chunkCoord, chunkBoundsMin, chunkBoundsMax);
     vec3 currentNormal = worldEntryNormal;
 
     vec3 nextBoundary = vec3(
@@ -571,7 +594,7 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters coun
         (nextBoundary.z - ro.z) * inv.z
     );
 
-    int maxChunkSteps = pc.chunkCounts.x * pc.chunkCounts.y * pc.chunkCounts.z;
+    int maxChunkSteps = pc.chunkWindowDimensions.x * pc.chunkWindowDimensions.y * pc.chunkWindowDimensions.z;
     for (int i = 0; i < maxChunkSteps; i++) {
         counters.chunkSteps++;
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
