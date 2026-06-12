@@ -55,7 +55,7 @@ private:
     std::chrono::steady_clock::time_point lastFrameTimestamp{};
     float frameRate = 0.0f;
     float frameTimeMs = 0.0f;
-    int rayQueryVisualizationMode = 1;
+    int rayQueryVisualizationMode = 0;
     float rayQueryVisualizationIntensity = 1.0f;
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
