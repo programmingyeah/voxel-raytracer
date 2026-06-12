@@ -1,6 +1,7 @@
 #include "chunk.hpp"
 
 #include <cstring>
+#include <utility>
 
 std::vector<Brick> Chunk::bricks{};
 
@@ -64,7 +65,8 @@ bool isUniformBrickOccupancy(const Brick& brick, uint8_t occupancyValue) {
 }
 }
 
-Chunk::Chunk(glm::ivec3 inChunkCoordinate) : chunkCoordinate(inChunkCoordinate) {
+Chunk::Chunk(glm::ivec3 inChunkCoordinate, size_t inChunkIndex)
+    : chunkCoordinate(inChunkCoordinate), chunkIndex(inChunkIndex) {
     clear();
 }
 
@@ -101,35 +103,48 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
 
         if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
             entry = makeBrickMapEntry(AIR_MATERIAL);
+            markBrickMapDirty(mapIndex);
             return;
         }
         if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
             entry = makeBrickMapEntry(value);
+            markBrickMapDirty(mapIndex);
             return;
         }
 
         const uint32_t explicitMaterialId = value != AIR_MATERIAL ? value : entry.materialId;
         bricks.push_back(brick);
-        entry = makeBrickMapEntry(explicitMaterialId, static_cast<uint32_t>(bricks.size() - 1));
+        const uint32_t brickIndex = static_cast<uint32_t>(bricks.size() - 1);
+        entry = makeBrickMapEntry(explicitMaterialId, brickIndex);
+        markBrickMapDirty(mapIndex);
+        markBrickPoolDirty(brickIndex);
         return;
     }
 
-    Brick& brick = bricks[entry.index];
+    const uint32_t explicitBrickIndex = entry.index;
+    Brick& brick = bricks[explicitBrickIndex];
     brick.voxels[localX][localY][localZ] = value != AIR_MATERIAL ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
     if (value != AIR_MATERIAL) {
         entry.materialId = value;
     }
     recomputeOccupancyMask(brick);
+    markBrickPoolDirty(explicitBrickIndex);
 
     if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
         entry = makeBrickMapEntry(AIR_MATERIAL);
+        markBrickMapDirty(mapIndex);
     } else if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
         entry = makeBrickMapEntry(entry.materialId);
+        markBrickMapDirty(mapIndex);
+    } else {
+        markBrickMapDirty(mapIndex);
     }
 }
 
 void Chunk::setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId) {
-    brickMap[brickMapIndexFromBrickCoord(brickX, brickY, brickZ)] = makeBrickMapEntry(materialId);
+    const uint32_t mapIndex = brickMapIndexFromBrickCoord(brickX, brickY, brickZ);
+    brickMap[mapIndex] = makeBrickMapEntry(materialId);
+    markBrickMapDirty(mapIndex);
 }
 
 void Chunk::setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick) {
@@ -137,20 +152,34 @@ void Chunk::setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, 
 
     if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
         brickMap[mapIndex] = makeBrickMapEntry(AIR_MATERIAL);
+        markBrickMapDirty(mapIndex);
         return;
     }
 
     if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
         brickMap[mapIndex] = makeBrickMapEntry(materialId);
+        markBrickMapDirty(mapIndex);
         return;
     }
 
     bricks.push_back(brick);
-    brickMap[mapIndex] = makeBrickMapEntry(materialId, static_cast<uint32_t>(bricks.size() - 1));
+    const uint32_t brickIndex = static_cast<uint32_t>(bricks.size() - 1);
+    brickMap[mapIndex] = makeBrickMapEntry(materialId, brickIndex);
+    markBrickMapDirty(mapIndex);
+    markBrickPoolDirty(brickIndex);
 }
 
 void Chunk::clear() {
     brickMap.fill(makeBrickMapEntry(AIR_MATERIAL));
+    markWholeChunkDirty();
+}
+
+void Chunk::setDirtyCallbacks(
+    ChunkBrickMapDirtyCallback inChunkBrickMapDirtyCallback,
+    BrickPoolDirtyCallback inBrickPoolDirtyCallback
+) {
+    chunkBrickMapDirtyCallback = std::move(inChunkBrickMapDirtyCallback);
+    brickPoolDirtyCallback = std::move(inBrickPoolDirtyCallback);
 }
 
 void Chunk::reserveBrickPool(size_t brickCount) {
@@ -188,6 +217,28 @@ void Chunk::recomputeOccupancyMask(Brick& brick) {
                 }
             }
         }
+    }
+}
+
+void Chunk::markBrickMapDirty(uint32_t mapIndex) {
+    if (chunkBrickMapDirtyCallback) {
+        chunkBrickMapDirtyCallback(chunkIndex, mapIndex);
+    }
+}
+
+void Chunk::markWholeChunkDirty() {
+    if (!chunkBrickMapDirtyCallback) {
+        return;
+    }
+
+    for (uint32_t mapIndex = 0; mapIndex < BRICK_COUNT; mapIndex++) {
+        chunkBrickMapDirtyCallback(chunkIndex, mapIndex);
+    }
+}
+
+void Chunk::markBrickPoolDirty(uint32_t brickIndex) {
+    if (brickPoolDirtyCallback) {
+        brickPoolDirtyCallback(brickIndex);
     }
 }
 

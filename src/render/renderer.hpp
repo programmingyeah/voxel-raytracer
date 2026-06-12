@@ -21,13 +21,13 @@
 
 class VulkanApp {
 public:
-    GLFWwindow* init(const VoxelWorld& world, const WorldGenerationStats& worldStats);
+    GLFWwindow* init(VoxelWorld& world, const WorldGenerationStats& worldStats);
     void drawFrame(const Camera& camera);
     void cleanup();
 
     Instance instance;
 private:
-    const VoxelWorld* world = nullptr;
+    VoxelWorld* world = nullptr;
     WorldGenerationStats worldStats{};
     GLFWwindow* window = nullptr;
     Swapchain swapchain;
@@ -62,6 +62,7 @@ private:
     void initVulkan();
     void createComputeImages();
     void createWorldBuffers();
+    void syncWorldBuffers();
     void createDescriptorSets(bool allocateSets);
     void createComputePipeline();
     void createImGuiDescriptorPool();

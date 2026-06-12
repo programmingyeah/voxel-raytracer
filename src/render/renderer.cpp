@@ -1,5 +1,7 @@
 #include "renderer.hpp"
+#include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +26,32 @@ VkDeviceSize storageBufferSize(const std::vector<uint32_t>& data)
     return sizeof(uint32_t) * static_cast<VkDeviceSize>(data.empty() ? 1 : data.size());
 }
 
+VkDeviceSize storageBufferSize(size_t wordCount)
+{
+    return sizeof(uint32_t) * static_cast<VkDeviceSize>(wordCount == 0 ? 1 : wordCount);
+}
+
+size_t worstCaseExplicitBrickCount(const VoxelWorld& world)
+{
+    return world.getChunkCount() * Chunk::BRICK_COUNT;
+}
+
+std::vector<BufferCopyRegion> byteRegionsFromWordRegions(const std::vector<GpuBufferCopyRegion>& wordRegions)
+{
+    std::vector<BufferCopyRegion> byteRegions;
+    byteRegions.reserve(wordRegions.size());
+
+    for (const GpuBufferCopyRegion& region : wordRegions) {
+        byteRegions.push_back({
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(region.srcWordOffset),
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(region.dstWordOffset),
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(region.wordCount)
+        });
+    }
+
+    return byteRegions;
+}
+
 void uploadBufferWithStaging(Instance& instance, CommandPool& commandPool, Buffer& destinationBuffer, const std::vector<uint32_t>& data)
 {
     Buffer stagingBuffer{};
@@ -34,13 +62,40 @@ void uploadBufferWithStaging(Instance& instance, CommandPool& commandPool, Buffe
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
     );
 
-    const uint32_t zero = 0;
-    stagingBuffer.upload(
+    stagingBuffer.upload(&instance, data.data(), static_cast<size_t>(sizeof(uint32_t) * data.size()));
+
+    Buffer::copyBuffer(
         &instance,
-        data.empty() ? static_cast<const void*>(&zero) : static_cast<const void*>(data.data()),
-        destinationBuffer.size
+        stagingBuffer.buffer,
+        destinationBuffer.buffer,
+        std::vector<BufferCopyRegion>{{0, 0, destinationBuffer.size}},
+        commandPool
     );
-    Buffer::copyBuffer(&instance, stagingBuffer.buffer, destinationBuffer.buffer, destinationBuffer.size, commandPool);
+    stagingBuffer.cleanup(&instance);
+}
+
+void uploadBufferDiffWithStaging(Instance& instance, CommandPool& commandPool, Buffer& destinationBuffer, const GpuBufferDiff& diff)
+{
+    if (diff.empty()) {
+        return;
+    }
+
+    Buffer stagingBuffer{};
+    stagingBuffer.createBuffer(
+        &instance,
+        storageBufferSize(diff.data),
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+
+    stagingBuffer.upload(&instance, diff.data.data(), stagingBuffer.size);
+    Buffer::copyBuffer(
+        &instance,
+        stagingBuffer.buffer,
+        destinationBuffer.buffer,
+        byteRegionsFromWordRegions(diff.regions),
+        commandPool
+    );
     stagingBuffer.cleanup(&instance);
 }
 
@@ -110,7 +165,7 @@ void VulkanApp::framebufferResizeCallback(GLFWwindow* window, int width, int hei
     app->framebufferResized = true;
 }
 
-GLFWwindow* VulkanApp::init(const VoxelWorld& worldRef, const WorldGenerationStats& inWorldStats) {
+GLFWwindow* VulkanApp::init(VoxelWorld& worldRef, const WorldGenerationStats& inWorldStats) {
     world = &worldRef;
     worldStats = inWorldStats;
     lastFrameTimestamp = std::chrono::steady_clock::now();
@@ -386,7 +441,17 @@ void VulkanApp::createWorldBuffers() {
 
     const GpuVoxelBuffers gpuBuffers = world->buildGpuBuffers();
     const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
-    const VkDeviceSize brickPoolBufferSize = storageBufferSize(gpuBuffers.brickData);
+    const size_t worstCaseBrickCount = worstCaseExplicitBrickCount(*world);
+    const size_t actualBrickCount = Chunk::getBrickPool().size();
+    assert(actualBrickCount <= worstCaseBrickCount && "explicit brick pool exceeded worst-case live chunk capacity");
+    const VkDeviceSize brickPoolBufferSize = storageBufferSize(worstCaseBrickCount * PACKED_BRICK_WORD_COUNT);
+
+    if (chunkBrickMapBuffer.buffer != VK_NULL_HANDLE) {
+        chunkBrickMapBuffer.cleanup(&instance);
+    }
+    if (brickPoolBuffer.buffer != VK_NULL_HANDLE) {
+        brickPoolBuffer.cleanup(&instance);
+    }
 
     chunkBrickMapBuffer.createBuffer(
         &instance,
@@ -403,6 +468,34 @@ void VulkanApp::createWorldBuffers() {
 
     uploadBufferWithStaging(instance, commandPool, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
     uploadBufferWithStaging(instance, commandPool, brickPoolBuffer, gpuBuffers.brickData);
+    world->clearDirtyState();
+}
+
+void VulkanApp::syncWorldBuffers() {
+    if (world == nullptr) {
+        return;
+    }
+
+    const GpuWorldDiff worldDiff = world->buildGpuBufferDiffs();
+    const size_t worstCaseBrickCount = worstCaseExplicitBrickCount(*world);
+    const size_t actualBrickCount = Chunk::getBrickPool().size();
+    assert(actualBrickCount <= worstCaseBrickCount && "explicit brick pool exceeded worst-case live chunk capacity");
+    const VkDeviceSize requiredChunkBrickMapBufferSize = storageBufferSize(worldDiff.chunkBrickMaps.totalWordCount);
+    const VkDeviceSize requiredBrickPoolBufferSize = storageBufferSize(worldDiff.brickData.totalWordCount);
+
+    if (requiredChunkBrickMapBufferSize > chunkBrickMapBuffer.size || requiredBrickPoolBufferSize > brickPoolBuffer.size) {
+        vkDeviceWaitIdle(instance.device());
+        createWorldBuffers();
+        createDescriptorSets(false);
+        return;
+    }
+
+    if (worldDiff.empty()) {
+        return;
+    }
+
+    uploadBufferDiffWithStaging(instance, commandPool, chunkBrickMapBuffer, worldDiff.chunkBrickMaps);
+    uploadBufferDiffWithStaging(instance, commandPool, brickPoolBuffer, worldDiff.brickData);
 }
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
@@ -538,6 +631,7 @@ void VulkanApp::drawFrame(const Camera& camera) {
     FrameSyncObjects frameSyncObjects = syncManager.getFrame(currentFrame);
 
     vkWaitForFences(instance.device(), 1, &frameSyncObjects.inFlight, VK_TRUE, UINT64_MAX);
+    syncWorldBuffers();
 
     uint32_t imageIndex = 0;
     VkResult result = vkAcquireNextImageKHR(

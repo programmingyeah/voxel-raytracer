@@ -6,8 +6,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <vector>
+
+using ChunkBrickMapDirtyCallback = std::function<void(size_t, uint32_t)>;
+using BrickPoolDirtyCallback = std::function<void(uint32_t)>;
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
@@ -33,7 +37,7 @@ public:
 
     using EncodedBrickMap = std::array<BrickMapEntry, BRICK_COUNT>;
 
-    explicit Chunk(glm::ivec3 chunkCoordinate = glm::ivec3(0));
+    explicit Chunk(glm::ivec3 chunkCoordinate = glm::ivec3(0), size_t chunkIndex = 0);
 
     uint32_t get(uint32_t x, uint32_t y, uint32_t z) const;
     void set(uint32_t x, uint32_t y, uint32_t z, uint32_t value);
@@ -41,6 +45,10 @@ public:
     void setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId);
     void setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick);
     void clear();
+    void setDirtyCallbacks(
+        ChunkBrickMapDirtyCallback inChunkBrickMapDirtyCallback,
+        BrickPoolDirtyCallback inBrickPoolDirtyCallback
+    );
 
     glm::ivec3 getChunkCoordinate() const { return chunkCoordinate; }
     const EncodedBrickMap& getBrickMap() const { return brickMap; }
@@ -52,8 +60,15 @@ public:
     static void fillBrick(Brick& brick, uint8_t value);
 
 private:
+    void markBrickMapDirty(uint32_t mapIndex);
+    void markWholeChunkDirty();
+    void markBrickPoolDirty(uint32_t brickIndex);
+
     glm::ivec3 chunkCoordinate{};
+    size_t chunkIndex = 0;
     EncodedBrickMap brickMap{};
+    ChunkBrickMapDirtyCallback chunkBrickMapDirtyCallback;
+    BrickPoolDirtyCallback brickPoolDirtyCallback;
 
     // Brick map entries always store a material id for uniform shading / LOD fallback.
     // index == BRICK_MAP_EMPTY means no explicit brick pool entry is referenced.

@@ -33,11 +33,16 @@ void Buffer::createBuffer(Instance* instance, VkDeviceSize bufferSize, VkBufferU
 }
 
 void Buffer::destroyBuffer(Instance* instance) {
-    vkDestroyBuffer(instance->device(), buffer, nullptr);
-    vkFreeMemory(instance->device(), memory, nullptr);
+    if (buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(instance->device(), buffer, nullptr);
+    }
+    if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(instance->device(), memory, nullptr);
+    }
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     mapped = nullptr;
+    size = 0;
 }
 
 void Buffer::map(Instance* instance) {
@@ -55,19 +60,40 @@ void Buffer::upload(Instance* instance, const void* srcData, VkDeviceSize dataSi
     unmap(instance);
 }
 
-void Buffer::copyBuffer(Instance* instance, VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, CommandPool pool) {
-    VkCommandBuffer commandBuffer = instance->beginSingleTimeCommands(pool);
+void Buffer::copyBuffer(
+    Instance* instance,
+    VkBuffer srcBuffer,
+    VkBuffer dstBuffer,
+    const std::vector<BufferCopyRegion>& regions,
+    CommandPool pool
+) {
+    if (regions.empty()) {
+        return;
+    }
 
-    VkBufferCopy copyRegion{};
-    copyRegion.srcOffset = 0; // Optional
-    copyRegion.dstOffset = 0; // Optional
-    copyRegion.size = size;
-    vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+    VkCommandBuffer commandBuffer = instance->beginSingleTimeCommands(pool);
+    std::vector<VkBufferCopy> vkRegions;
+    vkRegions.reserve(regions.size());
+
+    for (const BufferCopyRegion& region : regions) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = region.srcOffset;
+        copyRegion.dstOffset = region.dstOffset;
+        copyRegion.size = region.size;
+        vkRegions.push_back(copyRegion);
+    }
+
+    vkCmdCopyBuffer(
+        commandBuffer,
+        srcBuffer,
+        dstBuffer,
+        static_cast<uint32_t>(vkRegions.size()),
+        vkRegions.data()
+    );
 
     instance->endSingleTimeCommands(pool, commandBuffer);
 }
 
 void Buffer::cleanup(Instance* instance) {
-    vkDestroyBuffer(instance->device(), buffer, nullptr);
-    vkFreeMemory(instance->device(), memory, nullptr);
+    destroyBuffer(instance);
 }
