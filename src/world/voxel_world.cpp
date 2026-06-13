@@ -66,11 +66,17 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
     }
 
     const size_t totalChunkCount = static_cast<size_t>(chunkCounts.x) * chunkCounts.y * chunkCounts.z;
-    Chunk::initializeBrickPool(totalChunkCount);
     chunks.reserve(totalChunkCount);
     chunkWindowIndices.resize(totalChunkCount);
     std::iota(chunkWindowIndices.begin(), chunkWindowIndices.end(), 0u);
     chunkSlotSolidVoxelCounts.assign(totalChunkCount, 0u);
+    chunkSlotGenerated.assign(totalChunkCount, 0u);
+
+    explicitBricks.assign(totalChunkCount * Chunk::BRICK_COUNT, Brick{});
+    freeExplicitBrickIndices.reserve(explicitBricks.size());
+    for (size_t brickIndex = explicitBricks.size(); brickIndex > 0; brickIndex--) {
+        freeExplicitBrickIndices.push_back(static_cast<uint32_t>(brickIndex - 1u));
+    }
 
     for (uint32_t z = 0; z < chunkCounts.z; z++) {
         for (uint32_t y = 0; y < chunkCounts.y; y++) {
@@ -80,7 +86,14 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
                     chunkOrigin + glm::ivec3(static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)),
                     currentChunkIndex
                 );
-                chunks.back().setDirtyCallbacks(
+                chunks.back().setStorageCallbacks(
+                    &explicitBricks,
+                    [this]() {
+                        return allocateExplicitBrick();
+                    },
+                    [this](uint32_t brickIndex) {
+                        releaseExplicitBrick(brickIndex);
+                    },
                     [this](size_t dirtyChunkIndex, uint32_t mapIndex) {
                         onChunkBrickMapDirty(dirtyChunkIndex, mapIndex);
                     },
@@ -94,7 +107,7 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
 
     dirtyChunkWindowIndices.assign(chunkWindowIndices.size(), 0u);
     dirtyChunkBrickMapEntries.assign(chunks.size() * Chunk::BRICK_COUNT, 0u);
-    dirtyBrickPoolEntries.assign(Chunk::getBrickPool().size(), 0u);
+    dirtyBrickPoolEntries.assign(explicitBricks.size(), 0u);
 }
 
 Chunk& VoxelWorld::getChunk(uint32_t x, uint32_t y, uint32_t z) {
@@ -202,7 +215,12 @@ std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
         const uint32_t recycledChunkSlot = recycledChunkSlots.back();
         recycledChunkSlots.pop_back();
         nextChunkWindowIndices[localWindowIndex] = recycledChunkSlot;
-        chunks[recycledChunkSlot].setChunkCoordinate(newChunkOrigin + glm::ivec3(chunkCoordFromWindowIndex(localWindowIndex)));
+
+        Chunk& chunk = chunks[recycledChunkSlot];
+        chunk.setChunkCoordinate(newChunkOrigin + glm::ivec3(chunkCoordFromWindowIndex(localWindowIndex)));
+        chunk.clear();
+        chunkSlotSolidVoxelCounts[recycledChunkSlot] = 0u;
+        chunkSlotGenerated[recycledChunkSlot] = 0u;
         enteringWindowIndices.push_back(static_cast<uint32_t>(localWindowIndex));
     }
 
@@ -215,6 +233,16 @@ std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
     chunkWindowIndices = std::move(nextChunkWindowIndices);
     chunkOrigin = newChunkOrigin;
     return enteringWindowIndices;
+}
+
+std::vector<uint32_t> VoxelWorld::centerChunkWindowXZ(glm::ivec2 centerChunkXZ) {
+    const glm::ivec3 targetChunkOrigin(
+        centerChunkXZ.x - static_cast<int32_t>(chunkCounts.x / 2u),
+        chunkOrigin.y,
+        centerChunkXZ.y - static_cast<int32_t>(chunkCounts.z / 2u)
+    );
+
+    return shiftChunkWindow(targetChunkOrigin - chunkOrigin);
 }
 
 glm::ivec3 VoxelWorld::getVoxelMin() const {
@@ -244,11 +272,10 @@ GpuVoxelBuffers VoxelWorld::buildGpuBuffers() const {
         }
     }
 
-    const std::vector<Brick>& brickPool = Chunk::getBrickPool();
-    gpuBuffers.brickData.assign(brickPool.size() * PACKED_BRICK_WORD_COUNT, 0u);
+    gpuBuffers.brickData.assign(explicitBricks.size() * PACKED_BRICK_WORD_COUNT, 0u);
 
-    for (size_t brickIndex = 0; brickIndex < brickPool.size(); brickIndex++) {
-        packBrick(gpuBuffers.brickData, brickIndex, brickPool[brickIndex]);
+    for (size_t brickIndex = 0; brickIndex < explicitBricks.size(); brickIndex++) {
+        packBrick(gpuBuffers.brickData, brickIndex, explicitBricks[brickIndex]);
     }
 
     return gpuBuffers;
@@ -258,7 +285,7 @@ GpuWorldDiff VoxelWorld::buildGpuBufferDiffs() {
     GpuWorldDiff worldDiff{};
     worldDiff.chunkWindowIndices.totalWordCount = chunkWindowIndices.size();
     worldDiff.chunkBrickMaps.totalWordCount = chunks.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-    worldDiff.brickData.totalWordCount = Chunk::getBrickPool().size() * PACKED_BRICK_WORD_COUNT;
+    worldDiff.brickData.totalWordCount = explicitBricks.size() * PACKED_BRICK_WORD_COUNT;
 
     const std::vector<std::pair<size_t, size_t>> dirtyChunkWindowSpans = buildDirtySpans(dirtyChunkWindowIndices);
     for (const auto& span : dirtyChunkWindowSpans) {
@@ -299,7 +326,6 @@ GpuWorldDiff VoxelWorld::buildGpuBufferDiffs() {
     }
 
     const std::vector<std::pair<size_t, size_t>> dirtyBrickSpans = buildDirtySpans(dirtyBrickPoolEntries);
-    const std::vector<Brick>& brickPool = Chunk::getBrickPool();
     for (const auto& span : dirtyBrickSpans) {
         const size_t spanStartBrick = span.first;
         const size_t spanBrickCount = span.second;
@@ -311,7 +337,11 @@ GpuWorldDiff VoxelWorld::buildGpuBufferDiffs() {
         worldDiff.brickData.regions.push_back({srcWordOffset, dstWordOffset, wordCount});
 
         for (size_t brickOffset = 0; brickOffset < spanBrickCount; brickOffset++) {
-            packBrick(worldDiff.brickData.data, (srcWordOffset / PACKED_BRICK_WORD_COUNT) + brickOffset, brickPool[spanStartBrick + brickOffset]);
+            packBrick(
+                worldDiff.brickData.data,
+                (srcWordOffset / PACKED_BRICK_WORD_COUNT) + brickOffset,
+                explicitBricks[spanStartBrick + brickOffset]
+            );
         }
     }
 
@@ -323,6 +353,26 @@ void VoxelWorld::clearDirtyState() {
     std::fill(dirtyChunkWindowIndices.begin(), dirtyChunkWindowIndices.end(), 0u);
     std::fill(dirtyChunkBrickMapEntries.begin(), dirtyChunkBrickMapEntries.end(), 0u);
     std::fill(dirtyBrickPoolEntries.begin(), dirtyBrickPoolEntries.end(), 0u);
+}
+
+uint32_t VoxelWorld::allocateExplicitBrick() {
+    if (freeExplicitBrickIndices.empty()) {
+        throw std::runtime_error("explicit brick pool exhausted");
+    }
+
+    const uint32_t brickIndex = freeExplicitBrickIndices.back();
+    freeExplicitBrickIndices.pop_back();
+    return brickIndex;
+}
+
+void VoxelWorld::releaseExplicitBrick(uint32_t brickIndex) {
+    if (brickIndex >= explicitBricks.size()) {
+        return;
+    }
+
+    explicitBricks[brickIndex] = Brick{};
+    onBrickPoolDirty(brickIndex);
+    freeExplicitBrickIndices.push_back(brickIndex);
 }
 
 void VoxelWorld::onChunkBrickMapDirty(size_t dirtyChunkIndex, uint32_t mapIndex) {
@@ -342,12 +392,28 @@ void VoxelWorld::onBrickPoolDirty(uint32_t brickIndex) {
     dirtyBrickPoolEntries[brickIndex] = 1u;
 }
 
+bool VoxelWorld::isChunkGeneratedByWindowIndex(size_t localWindowIndex) const {
+    return chunkSlotGenerated.at(chunkWindowIndices.at(localWindowIndex)) != 0u;
+}
+
+void VoxelWorld::setChunkGeneratedByWindowIndex(size_t localWindowIndex, bool generated) {
+    chunkSlotGenerated.at(chunkWindowIndices.at(localWindowIndex)) = generated ? 1u : 0u;
+}
+
 void VoxelWorld::setChunkSolidVoxelCountByWindowIndex(size_t localWindowIndex, uint64_t solidVoxelCount) {
     chunkSlotSolidVoxelCounts.at(chunkWindowIndices.at(localWindowIndex)) = solidVoxelCount;
 }
 
 uint64_t VoxelWorld::getTotalSolidVoxelCount() const {
     return std::accumulate(chunkSlotSolidVoxelCounts.begin(), chunkSlotSolidVoxelCounts.end(), uint64_t{0});
+}
+
+size_t VoxelWorld::getGeneratedChunkCount() const {
+    return static_cast<size_t>(std::count(chunkSlotGenerated.begin(), chunkSlotGenerated.end(), static_cast<uint8_t>(1u)));
+}
+
+size_t VoxelWorld::getAllocatedExplicitBrickCount() const {
+    return explicitBricks.size() - freeExplicitBrickIndices.size();
 }
 
 size_t VoxelWorld::chunkIndex(uint32_t x, uint32_t y, uint32_t z) const {

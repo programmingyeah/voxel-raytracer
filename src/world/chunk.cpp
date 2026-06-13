@@ -1,9 +1,8 @@
 #include "chunk.hpp"
 
 #include <cstring>
+#include <stdexcept>
 #include <utility>
-
-std::vector<Brick> Chunk::bricks{};
 
 namespace {
 constexpr uint32_t LAST_OCCUPANCY_WORD_BITS = COARSE_CELL_COUNT % 32u;
@@ -70,8 +69,36 @@ Chunk::Chunk(glm::ivec3 inChunkCoordinate, size_t inChunkSlotIndex)
     clear();
 }
 
-uint32_t Chunk::explicitBrickIndex(uint32_t mapIndex) const {
-    return static_cast<uint32_t>(chunkSlotIndex * BRICK_COUNT + mapIndex);
+std::vector<Brick>& Chunk::brickPool() {
+    if (externalBrickPool == nullptr) {
+        throw std::runtime_error("chunk brick pool is not initialized");
+    }
+
+    return *externalBrickPool;
+}
+
+const std::vector<Brick>& Chunk::brickPool() const {
+    if (externalBrickPool == nullptr) {
+        throw std::runtime_error("chunk brick pool is not initialized");
+    }
+
+    return *externalBrickPool;
+}
+
+uint32_t Chunk::allocateExplicitBrick() {
+    if (!allocateBrickCallback) {
+        throw std::runtime_error("chunk brick allocator callback is not initialized");
+    }
+
+    return allocateBrickCallback();
+}
+
+void Chunk::releaseExplicitBrick(uint32_t brickIndex) {
+    if (!releaseBrickCallback) {
+        throw std::runtime_error("chunk brick release callback is not initialized");
+    }
+
+    releaseBrickCallback(brickIndex);
 }
 
 uint32_t Chunk::get(uint32_t x, uint32_t y, uint32_t z) const {
@@ -80,7 +107,7 @@ uint32_t Chunk::get(uint32_t x, uint32_t y, uint32_t z) const {
         return entry.materialId;
     }
 
-    const Brick& brick = bricks[entry.index];
+    const Brick& brick = brickPool()[entry.index];
     const uint32_t localX = x % BRICK_SIZE;
     const uint32_t localY = y % BRICK_SIZE;
     const uint32_t localZ = z % BRICK_SIZE;
@@ -117,8 +144,8 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
         }
 
         const uint32_t explicitMaterialId = value != AIR_MATERIAL ? value : entry.materialId;
-        const uint32_t brickIndex = explicitBrickIndex(mapIndex);
-        bricks.at(brickIndex) = brick;
+        const uint32_t brickIndex = allocateExplicitBrick();
+        brickPool().at(brickIndex) = brick;
         entry = makeBrickMapEntry(explicitMaterialId, brickIndex);
         markBrickMapDirty(mapIndex);
         markBrickPoolDirty(brickIndex);
@@ -126,7 +153,7 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
     }
 
     const uint32_t explicitBrickIndex = entry.index;
-    Brick& brick = bricks[explicitBrickIndex];
+    Brick& brick = brickPool()[explicitBrickIndex];
     brick.voxels[localX][localY][localZ] = value != AIR_MATERIAL ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
     if (value != AIR_MATERIAL) {
         entry.materialId = value;
@@ -135,9 +162,11 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
     markBrickPoolDirty(explicitBrickIndex);
 
     if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
+        releaseExplicitBrick(explicitBrickIndex);
         entry = makeBrickMapEntry(AIR_MATERIAL);
         markBrickMapDirty(mapIndex);
     } else if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
+        releaseExplicitBrick(explicitBrickIndex);
         entry = makeBrickMapEntry(entry.materialId);
         markBrickMapDirty(mapIndex);
     } else {
@@ -147,47 +176,61 @@ void Chunk::set(uint32_t x, uint32_t y, uint32_t z, uint32_t value) {
 
 void Chunk::setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId) {
     const uint32_t mapIndex = brickMapIndexFromBrickCoord(brickX, brickY, brickZ);
-    brickMap[mapIndex] = makeBrickMapEntry(materialId);
+    BrickMapEntry& entry = brickMap[mapIndex];
+
+    if (hasExplicitBrick(entry)) {
+        releaseExplicitBrick(entry.index);
+    }
+
+    entry = makeBrickMapEntry(materialId);
     markBrickMapDirty(mapIndex);
 }
 
 void Chunk::setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick) {
     const uint32_t mapIndex = brickMapIndexFromBrickCoord(brickX, brickY, brickZ);
+    BrickMapEntry& entry = brickMap[mapIndex];
 
     if (isUniformBrickOccupancy(brick, BRICK_EMPTY_VOXEL)) {
-        brickMap[mapIndex] = makeBrickMapEntry(AIR_MATERIAL);
-        markBrickMapDirty(mapIndex);
+        setBrickUniform(brickX, brickY, brickZ, AIR_MATERIAL);
         return;
     }
 
     if (isUniformBrickOccupancy(brick, BRICK_SOLID_VOXEL)) {
-        brickMap[mapIndex] = makeBrickMapEntry(materialId);
-        markBrickMapDirty(mapIndex);
+        setBrickUniform(brickX, brickY, brickZ, materialId);
         return;
     }
 
-    const uint32_t brickIndex = explicitBrickIndex(mapIndex);
-    bricks.at(brickIndex) = brick;
-    brickMap[mapIndex] = makeBrickMapEntry(materialId, brickIndex);
+    const uint32_t brickIndex = hasExplicitBrick(entry) ? entry.index : allocateExplicitBrick();
+    brickPool().at(brickIndex) = brick;
+    entry = makeBrickMapEntry(materialId, brickIndex);
     markBrickMapDirty(mapIndex);
     markBrickPoolDirty(brickIndex);
 }
 
 void Chunk::clear() {
-    brickMap.fill(makeBrickMapEntry(AIR_MATERIAL));
+    for (BrickMapEntry& entry : brickMap) {
+        if (hasExplicitBrick(entry)) {
+            releaseExplicitBrick(entry.index);
+        }
+
+        entry = makeBrickMapEntry(AIR_MATERIAL);
+    }
+
     markWholeChunkDirty();
 }
 
-void Chunk::setDirtyCallbacks(
+void Chunk::setStorageCallbacks(
+    std::vector<Brick>* inBrickPool,
+    AllocateBrickCallback inAllocateBrickCallback,
+    ReleaseBrickCallback inReleaseBrickCallback,
     ChunkBrickMapDirtyCallback inChunkBrickMapDirtyCallback,
     BrickPoolDirtyCallback inBrickPoolDirtyCallback
 ) {
+    externalBrickPool = inBrickPool;
+    allocateBrickCallback = std::move(inAllocateBrickCallback);
+    releaseBrickCallback = std::move(inReleaseBrickCallback);
     chunkBrickMapDirtyCallback = std::move(inChunkBrickMapDirtyCallback);
     brickPoolDirtyCallback = std::move(inBrickPoolDirtyCallback);
-}
-
-void Chunk::initializeBrickPool(size_t chunkSlotCount) {
-    bricks.assign(chunkSlotCount * BRICK_COUNT, Brick{});
 }
 
 void Chunk::recomputeOccupancyMask(Brick& brick) {

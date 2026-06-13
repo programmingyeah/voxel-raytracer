@@ -3,6 +3,7 @@
 #include "voxel_world.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 struct WorldGenerationStats {
@@ -15,4 +16,5 @@ class WorldGenerator {
 public:
     WorldGenerationStats generateTerrain(VoxelWorld& world) const;
     WorldGenerationStats generateTerrain(VoxelWorld& world, const std::vector<uint32_t>& localChunkWindowIndices) const;
+    std::optional<WorldGenerationStats> generateNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ) const;
 };

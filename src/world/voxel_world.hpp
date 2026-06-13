@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chunk.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -54,6 +55,7 @@ public:
     uint32_t getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
     void setVoxel(uint32_t x, uint32_t y, uint32_t z, uint32_t value);
     std::vector<uint32_t> shiftChunkWindow(glm::ivec3 deltaChunks);
+    std::vector<uint32_t> centerChunkWindowXZ(glm::ivec2 centerChunkXZ);
 
     glm::uvec3 getChunkCounts() const { return chunkCounts; }
     glm::ivec3 getVoxelMin() const;
@@ -61,15 +63,23 @@ public:
     size_t getChunkCount() const { return chunkWindowIndices.size(); }
     Chunk& getChunkByWindowIndex(size_t localWindowIndex);
     const Chunk& getChunkByWindowIndex(size_t localWindowIndex) const;
+    bool isChunkGeneratedByWindowIndex(size_t localWindowIndex) const;
+    void setChunkGeneratedByWindowIndex(size_t localWindowIndex, bool generated);
     void setChunkSolidVoxelCountByWindowIndex(size_t localWindowIndex, uint64_t solidVoxelCount);
     uint64_t getTotalSolidVoxelCount() const;
+    size_t getGeneratedChunkCount() const;
     glm::uvec3 getVoxelDimensions() const;
+    size_t getExplicitBrickCapacity() const { return explicitBricks.size(); }
+    size_t getAllocatedExplicitBrickCount() const;
+    const std::vector<Brick>& getExplicitBrickPool() const { return explicitBricks; }
 
     GpuVoxelBuffers buildGpuBuffers() const;
     GpuWorldDiff buildGpuBufferDiffs();
     void clearDirtyState();
 
 private:
+    uint32_t allocateExplicitBrick();
+    void releaseExplicitBrick(uint32_t brickIndex);
     void onChunkBrickMapDirty(size_t chunkIndex, uint32_t mapIndex);
     void onBrickPoolDirty(uint32_t brickIndex);
     size_t chunkIndex(uint32_t x, uint32_t y, uint32_t z) const;
@@ -80,6 +90,9 @@ private:
     std::vector<Chunk> chunks;
     std::vector<uint32_t> chunkWindowIndices;
     std::vector<uint64_t> chunkSlotSolidVoxelCounts;
+    std::vector<uint8_t> chunkSlotGenerated;
+    std::vector<Brick> explicitBricks;
+    std::vector<uint32_t> freeExplicitBrickIndices;
     std::vector<uint8_t> dirtyChunkWindowIndices;
     std::vector<uint8_t> dirtyChunkBrickMapEntries;
     std::vector<uint8_t> dirtyBrickPoolEntries;

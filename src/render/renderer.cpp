@@ -31,11 +31,6 @@ VkDeviceSize storageBufferSize(size_t wordCount)
     return sizeof(uint32_t) * static_cast<VkDeviceSize>(wordCount == 0 ? 1 : wordCount);
 }
 
-size_t worstCaseExplicitBrickCount(const VoxelWorld& world)
-{
-    return world.getChunkCount() * Chunk::BRICK_COUNT;
-}
-
 std::vector<BufferCopyRegion> byteRegionsFromWordRegions(const std::vector<GpuBufferCopyRegion>& wordRegions)
 {
     std::vector<BufferCopyRegion> byteRegions;
@@ -455,10 +450,9 @@ void VulkanApp::createWorldBuffers() {
     const GpuVoxelBuffers gpuBuffers = world->buildGpuBuffers();
     const VkDeviceSize chunkWindowIndexBufferSize = storageBufferSize(gpuBuffers.chunkWindowIndices);
     const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
-    const size_t worstCaseBrickCount = worstCaseExplicitBrickCount(*world);
-    const size_t actualBrickCount = Chunk::getBrickPool().size();
-    assert(actualBrickCount <= worstCaseBrickCount && "explicit brick pool exceeded worst-case live chunk capacity");
-    const VkDeviceSize brickPoolBufferSize = storageBufferSize(worstCaseBrickCount * PACKED_BRICK_WORD_COUNT);
+    const VkDeviceSize brickPoolBufferSize = storageBufferSize(
+        world->getExplicitBrickCapacity() * PACKED_BRICK_WORD_COUNT
+    );
 
     if (chunkWindowIndexBuffer.buffer != VK_NULL_HANDLE) {
         chunkWindowIndexBuffer.cleanup(&instance);
@@ -501,9 +495,6 @@ void VulkanApp::syncWorldBuffers() {
     }
 
     const GpuWorldDiff worldDiff = world->buildGpuBufferDiffs();
-    const size_t worstCaseBrickCount = worstCaseExplicitBrickCount(*world);
-    const size_t actualBrickCount = Chunk::getBrickPool().size();
-    assert(actualBrickCount <= worstCaseBrickCount && "explicit brick pool exceeded worst-case live chunk capacity");
     const VkDeviceSize requiredChunkWindowIndexBufferSize = storageBufferSize(worldDiff.chunkWindowIndices.totalWordCount);
     const VkDeviceSize requiredChunkBrickMapBufferSize = storageBufferSize(worldDiff.chunkBrickMaps.totalWordCount);
     const VkDeviceSize requiredBrickPoolBufferSize = storageBufferSize(worldDiff.brickData.totalWordCount);
@@ -600,8 +591,10 @@ void VulkanApp::updateFrameTiming() {
 
 void VulkanApp::buildDiagnosticsUi() {
     const size_t chunkCount = world != nullptr ? world->getChunkCount() : 0;
+    const size_t generatedChunkCount = world != nullptr ? world->getGeneratedChunkCount() : 0;
     const uint64_t worldVoxelCount = static_cast<uint64_t>(chunkCount) * Chunk::VOXEL_COUNT;
-    const size_t brickCount = Chunk::getBrickPool().size();
+    const size_t allocatedBrickCount = world != nullptr ? world->getAllocatedExplicitBrickCount() : 0;
+    const size_t brickCapacity = world != nullptr ? world->getExplicitBrickCapacity() : 0;
     const VkDeviceSize worldBufferBytes = chunkBrickMapBuffer.size + brickPoolBuffer.size;
 
     const std::string worldBufferSize = formatByteSize(worldBufferBytes);
@@ -619,9 +612,10 @@ void VulkanApp::buildDiagnosticsUi() {
     ImGui::Text("Frame time: %.2f ms", frameTimeMs);
     ImGui::Separator();
     ImGui::Text("Chunk count: %zu", chunkCount);
+    ImGui::Text("Generated chunks: %zu / %zu", generatedChunkCount, chunkCount);
     ImGui::Text("Voxel count: %llu", static_cast<unsigned long long>(worldVoxelCount));
     ImGui::Text("Solid voxels: %llu", static_cast<unsigned long long>(worldStats.solidVoxelCount));
-    ImGui::Text("Brick count: %zu", brickCount);
+    ImGui::Text("Allocated bricks: %zu / %zu", allocatedBrickCount, brickCapacity);
     ImGui::Text("Avg chunk load: %.3f ms", worldStats.averageChunkGenerationMs);
     ImGui::Text("World gen total: %.2f ms", worldStats.totalGenerationMs);
     ImGui::Separator();

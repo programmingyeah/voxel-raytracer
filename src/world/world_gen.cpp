@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -150,6 +152,62 @@ uint64_t generateChunkTerrain(Chunk& chunk, const glm::uvec3& voxelDimensions, s
 
     return solidVoxelCount;
 }
+
+WorldGenerationStats generateChunkWindowIndices(
+    VoxelWorld& world,
+    const glm::uvec3& voxelDimensions,
+    const std::vector<uint32_t>& localChunkWindowIndices
+) {
+    WorldGenerationStats stats{};
+    const auto generationStart = std::chrono::steady_clock::now();
+    std::vector<uint32_t> columnHeights(static_cast<size_t>(Chunk::SIZE) * Chunk::SIZE);
+    double accumulatedChunkGenerationMs = 0.0;
+
+    for (uint32_t localWindowIndex : localChunkWindowIndices) {
+        const auto chunkStart = std::chrono::steady_clock::now();
+        Chunk& chunk = world.getChunkByWindowIndex(localWindowIndex);
+        const uint64_t solidVoxelCount = generateChunkTerrain(chunk, voxelDimensions, columnHeights);
+        world.setChunkSolidVoxelCountByWindowIndex(localWindowIndex, solidVoxelCount);
+        world.setChunkGeneratedByWindowIndex(localWindowIndex, true);
+
+        accumulatedChunkGenerationMs += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - chunkStart
+        ).count();
+    }
+
+    if (!localChunkWindowIndices.empty()) {
+        stats.averageChunkGenerationMs = accumulatedChunkGenerationMs / static_cast<double>(localChunkWindowIndices.size());
+    }
+
+    stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - generationStart
+    ).count();
+    stats.solidVoxelCount = world.getTotalSolidVoxelCount();
+    return stats;
+}
+
+std::optional<uint32_t> findNearestUngeneratedChunkWindowIndex(VoxelWorld& world, glm::ivec2 focusChunkXZ) {
+    std::optional<uint32_t> bestIndex;
+    int64_t bestDistanceSquared = std::numeric_limits<int64_t>::max();
+
+    for (size_t localWindowIndex = 0; localWindowIndex < world.getChunkCount(); localWindowIndex++) {
+        if (world.isChunkGeneratedByWindowIndex(localWindowIndex)) {
+            continue;
+        }
+
+        const glm::ivec3 chunkCoordinate = world.getChunkByWindowIndex(localWindowIndex).getChunkCoordinate();
+        const int64_t deltaX = static_cast<int64_t>(chunkCoordinate.x) - focusChunkXZ.x;
+        const int64_t deltaZ = static_cast<int64_t>(chunkCoordinate.z) - focusChunkXZ.y;
+        const int64_t distanceSquared = deltaX * deltaX + deltaZ * deltaZ;
+
+        if (!bestIndex.has_value() || distanceSquared < bestDistanceSquared) {
+            bestIndex = static_cast<uint32_t>(localWindowIndex);
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+
+    return bestIndex;
+}
 }
 
 WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world) const {
@@ -162,29 +220,14 @@ WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world) const {
 }
 
 WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world, const std::vector<uint32_t>& localChunkWindowIndices) const {
-    WorldGenerationStats stats{};
-    const glm::uvec3 voxelDimensions = world.getVoxelDimensions();
-    const auto generationStart = std::chrono::steady_clock::now();
-    std::vector<uint32_t> columnHeights(static_cast<size_t>(Chunk::SIZE) * Chunk::SIZE);
+    return generateChunkWindowIndices(world, world.getVoxelDimensions(), localChunkWindowIndices);
+}
 
-    for (uint32_t localWindowIndex : localChunkWindowIndices) {
-        const auto chunkStart = std::chrono::steady_clock::now();
-        Chunk& chunk = world.getChunkByWindowIndex(localWindowIndex);
-        const uint64_t solidVoxelCount = generateChunkTerrain(chunk, voxelDimensions, columnHeights);
-        world.setChunkSolidVoxelCountByWindowIndex(localWindowIndex, solidVoxelCount);
-
-        stats.totalGenerationMs += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - chunkStart
-        ).count();
+std::optional<WorldGenerationStats> WorldGenerator::generateNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ) const {
+    const std::optional<uint32_t> nextChunkIndex = findNearestUngeneratedChunkWindowIndex(world, focusChunkXZ);
+    if (!nextChunkIndex.has_value()) {
+        return std::nullopt;
     }
 
-    if (!localChunkWindowIndices.empty()) {
-        stats.averageChunkGenerationMs = stats.totalGenerationMs / static_cast<double>(localChunkWindowIndices.size());
-    }
-
-    stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - generationStart
-    ).count();
-    stats.solidVoxelCount = world.getTotalSolidVoxelCount();
-    return stats;
+    return generateChunkWindowIndices(world, world.getVoxelDimensions(), std::vector<uint32_t>{*nextChunkIndex});
 }

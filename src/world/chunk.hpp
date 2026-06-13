@@ -11,6 +11,8 @@
 #include <vector>
 
 using ChunkBrickMapDirtyCallback = std::function<void(size_t, uint32_t)>;
+using AllocateBrickCallback = std::function<uint32_t()>;
+using ReleaseBrickCallback = std::function<void(uint32_t)>;
 using BrickPoolDirtyCallback = std::function<void(uint32_t)>;
 
 #define GLM_FORCE_RADIANS
@@ -45,7 +47,10 @@ public:
     void setBrickUniform(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId);
     void setBrickExplicit(uint32_t brickX, uint32_t brickY, uint32_t brickZ, uint32_t materialId, const Brick& brick);
     void clear();
-    void setDirtyCallbacks(
+    void setStorageCallbacks(
+        std::vector<Brick>* inBrickPool,
+        AllocateBrickCallback inAllocateBrickCallback,
+        ReleaseBrickCallback inReleaseBrickCallback,
         ChunkBrickMapDirtyCallback inChunkBrickMapDirtyCallback,
         BrickPoolDirtyCallback inBrickPoolDirtyCallback
     );
@@ -54,13 +59,14 @@ public:
     void setChunkCoordinate(glm::ivec3 inChunkCoordinate) { chunkCoordinate = inChunkCoordinate; }
     const EncodedBrickMap& getBrickMap() const { return brickMap; }
 
-    static const std::vector<Brick>& getBrickPool() { return bricks; }
-    static void initializeBrickPool(size_t chunkSlotCount);
     static void recomputeOccupancyMask(Brick& brick);
     static void fillBrick(Brick& brick, uint8_t value);
 
 private:
-    uint32_t explicitBrickIndex(uint32_t mapIndex) const;
+    std::vector<Brick>& brickPool();
+    const std::vector<Brick>& brickPool() const;
+    uint32_t allocateExplicitBrick();
+    void releaseExplicitBrick(uint32_t brickIndex);
     void markBrickMapDirty(uint32_t mapIndex);
     void markWholeChunkDirty();
     void markBrickPoolDirty(uint32_t brickIndex);
@@ -68,10 +74,9 @@ private:
     glm::ivec3 chunkCoordinate{};
     size_t chunkSlotIndex = 0;
     EncodedBrickMap brickMap{};
+    std::vector<Brick>* externalBrickPool = nullptr;
+    AllocateBrickCallback allocateBrickCallback;
+    ReleaseBrickCallback releaseBrickCallback;
     ChunkBrickMapDirtyCallback chunkBrickMapDirtyCallback;
     BrickPoolDirtyCallback brickPoolDirtyCallback;
-
-    // Brick map entries always store a material id for uniform shading / LOD fallback.
-    // index == BRICK_MAP_EMPTY means no explicit brick pool entry is referenced.
-    static std::vector<Brick> bricks;
 };

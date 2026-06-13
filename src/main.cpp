@@ -7,13 +7,33 @@
 // note to future self: implement SDF at the BrickMap level, you gain sparsity win with little cost, 
 // test result: with 16 chunk render distance (204 meters), SDF data would be 2 MiB, brick data would be 150 MiB (awesome?)
 
+// second note: i am aware of the god awful performance, this is just because were assuming a worst-case amount of bricks per chunk
+// in the future we will use a fixed size buffer and dynamically evict bricks based on usage, optimization is not the goal yet
+
 namespace {
+constexpr uint32_t RENDER_DISTANCE = 5;
+constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
 constexpr float PLACE_VOXEL_STEP = 0.25f;
-constexpr float WORLD_STREAM_STEP_SECONDS = 10.0f;
+
+glm::uvec3 worldChunkCounts() {
+    return glm::uvec3(
+        2u * RENDER_DISTANCE + 1u,
+        WORLD_HEIGHT_CHUNKS,
+        2u * RENDER_DISTANCE + 1u
+    );
+}
 
 GLFWwindow* window = nullptr;
 VulkanApp renderer;
+
+glm::ivec2 chunkXZFromPosition(const glm::vec3& position) {
+    const glm::vec3 chunkPosition = glm::floor(position / static_cast<float>(Chunk::SIZE));
+    return glm::ivec2(
+        static_cast<int32_t>(chunkPosition.x),
+        static_cast<int32_t>(chunkPosition.z)
+    );
+}
 
 bool tryPlaceStoneVoxel(VoxelWorld& world, const Camera& camera) {
     if (!camera.isCursorLocked()) {
@@ -63,7 +83,6 @@ bool tryPlaceStoneVoxel(VoxelWorld& world, const Camera& camera) {
 
 void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera) {
     auto previousTime = std::chrono::steady_clock::now();
-    float streamStepAccumulator = 0.0f;
     bool rightMousePressedLastFrame = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -74,11 +93,10 @@ void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera)
         glfwPollEvents();
         camera.update(window, deltaTimeSeconds);
 
-        streamStepAccumulator += deltaTimeSeconds;
-        if (streamStepAccumulator >= WORLD_STREAM_STEP_SECONDS) {
-            streamStepAccumulator -= WORLD_STREAM_STEP_SECONDS;
-            const std::vector<uint32_t> enteringChunkWindowIndices = world.shiftChunkWindow(glm::ivec3(0, 0, 1));
-            renderer.setWorldStats(worldGenerator.generateTerrain(world, enteringChunkWindowIndices));
+        const glm::ivec2 focusChunkXZ = chunkXZFromPosition(camera.getPosition());
+        world.centerChunkWindowXZ(focusChunkXZ);
+        if (const auto generationStats = worldGenerator.generateNextChunk(world, focusChunkXZ); generationStats.has_value()) {
+            renderer.setWorldStats(*generationStats);
         }
 
         const bool rightMousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
@@ -96,11 +114,12 @@ void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera)
 
 int main() {
     try {
-        VoxelWorld world(glm::uvec3(5, 3, 5));
+        VoxelWorld world(worldChunkCounts());
         WorldGenerator worldGenerator;
-        const WorldGenerationStats worldStats = worldGenerator.generateTerrain(world);
-
         Camera camera(glm::vec3(320.0f, 160.0f, 256.0f));
+        world.centerChunkWindowXZ(chunkXZFromPosition(camera.getPosition()));
+        const WorldGenerationStats worldStats{};
+
         window = renderer.init(world, worldStats);
         camera.attachWindow(window);
 
