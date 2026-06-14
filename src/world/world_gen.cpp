@@ -47,6 +47,10 @@ WorldGenerator::~WorldGenerator() {
 }
 
 void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ, glm::vec3 viewForward) {
+    if (world.getGeneratedChunkCount() >= world.getChunkCount()) {
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         if (stopRequested || workerBusy || !pendingJobs.empty()) {

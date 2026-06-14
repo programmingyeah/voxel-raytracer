@@ -200,8 +200,23 @@ int chunkIndex(ivec3 localChunkCoord) {
     return localChunkCoord.x + pc.chunkWindowDimensions.x * (localChunkCoord.y + pc.chunkWindowDimensions.y * localChunkCoord.z);
 }
 
-int brickIndex(ivec3 brickCoord) {
-    return brickCoord.x + BRICKS_PER_AXIS * (brickCoord.y + BRICKS_PER_AXIS * brickCoord.z);
+uint mortonBrickIndex(ivec3 brickCoord) {
+    uint x = uint(brickCoord.x) & 0xFu;
+    uint y = uint(brickCoord.y) & 0xFu;
+    uint z = uint(brickCoord.z) & 0xFu;
+    return
+        ((x & 0x1u) << 0u) |
+        ((y & 0x1u) << 1u) |
+        ((z & 0x1u) << 2u) |
+        ((x & 0x2u) << 2u) |
+        ((y & 0x2u) << 3u) |
+        ((z & 0x2u) << 4u) |
+        ((x & 0x4u) << 4u) |
+        ((y & 0x4u) << 5u) |
+        ((z & 0x4u) << 6u) |
+        ((x & 0x8u) << 6u) |
+        ((y & 0x8u) << 7u) |
+        ((z & 0x8u) << 8u);
 }
 
 uint loadChunkRecordBase(ivec3 localChunkCoord) {
@@ -232,7 +247,7 @@ bool loadChunkAccelOccupancy2(uint chunkRecordBase, ivec3 cellCoord) {
 }
 
 uvec2 loadBrickEntry(uint chunkRecordBase, ivec3 brickCoord) {
-    uint packedEntryIndex = chunkRecordBase + CHUNK_BRICK_MAP_OFFSET + uint(brickIndex(brickCoord)) * BRICK_MAP_ENTRY_WORD_COUNT;
+    uint packedEntryIndex = chunkRecordBase + CHUNK_BRICK_MAP_OFFSET + mortonBrickIndex(brickCoord) * BRICK_MAP_ENTRY_WORD_COUNT;
     return uvec2(
         chunkBrickMaps.data[packedEntryIndex],
         chunkBrickMaps.data[packedEntryIndex + 1u]

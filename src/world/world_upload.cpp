@@ -43,6 +43,22 @@ uint32_t accelIndex2(uint32_t x, uint32_t y, uint32_t z) {
     return x + 2u * (y + 2u * z);
 }
 
+uint32_t mortonBrickIndex(uint32_t x, uint32_t y, uint32_t z) {
+    return
+        ((x & 0x1u) << 0u) |
+        ((y & 0x1u) << 1u) |
+        ((z & 0x1u) << 2u) |
+        ((x & 0x2u) << 2u) |
+        ((y & 0x2u) << 3u) |
+        ((z & 0x2u) << 4u) |
+        ((x & 0x4u) << 4u) |
+        ((y & 0x4u) << 5u) |
+        ((z & 0x4u) << 6u) |
+        ((x & 0x8u) << 6u) |
+        ((y & 0x8u) << 7u) |
+        ((z & 0x8u) << 8u);
+}
+
 bool brickEntryHasRenderableContent(const BrickMapEntry& entry) {
     return entry.index != BRICK_MAP_EMPTY || entry.materialId != AIR_MATERIAL;
 }
@@ -94,9 +110,10 @@ void packChunkRecord(
         for (uint32_t brickY = 0; brickY < Chunk::BRICKS_PER_AXIS; brickY++) {
             for (uint32_t brickX = 0; brickX < Chunk::BRICKS_PER_AXIS; brickX++) {
                 const uint32_t brickMapIndex = brickX + Chunk::BRICKS_PER_AXIS * (brickY + Chunk::BRICKS_PER_AXIS * brickZ);
+                const uint32_t packedBrickMapIndex = mortonBrickIndex(brickX, brickY, brickZ);
                 const BrickMapEntry entry = brickMap[brickMapIndex];
                 const size_t entryBaseIndex = chunkBaseIndex + CHUNK_BRICK_MAP_OFFSET +
-                    static_cast<size_t>(brickMapIndex) * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+                    static_cast<size_t>(packedBrickMapIndex) * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
                 packBrickMapEntry(chunkBrickMaps, entryBaseIndex, entry);
 
                 if (!brickEntryHasRenderableContent(entry)) {
