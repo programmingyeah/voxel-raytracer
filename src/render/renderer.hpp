@@ -41,6 +41,15 @@ private:
     Buffer chunkWindowIndexBuffer{};
     Buffer chunkBrickMapBuffer{};
     Buffer brickPoolBuffer{};
+    struct PendingBufferUpload {
+        Buffer stagingBuffer{};
+        VkBuffer destinationBuffer = VK_NULL_HANDLE;
+        std::vector<BufferCopyRegion> regions;
+    };
+    struct DeferredUploadResources {
+        std::vector<PendingBufferUpload> pendingUploads;
+    };
+    std::vector<DeferredUploadResources> deferredUploadResources;
     SyncManager syncManager;
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
     VkRenderPass imguiRenderPass = VK_NULL_HANDLE;
@@ -64,6 +73,8 @@ private:
     void createComputeImages();
     void createWorldBuffers();
     void syncWorldBuffers();
+    void recordPreparedWorldBufferUploads(VkCommandBuffer commandBuffer);
+    void cleanupDeferredUploadResources(size_t frameIndex);
     void createDescriptorSets(bool allocateSets);
     void createComputePipeline();
     void createImGuiDescriptorPool();

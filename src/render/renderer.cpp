@@ -76,29 +76,23 @@ void uploadBufferWithStaging(Instance& instance, CommandPool& commandPool, Buffe
     stagingBuffer.cleanup(&instance);
 }
 
-void uploadBufferDiffWithStaging(Instance& instance, CommandPool& commandPool, Buffer& destinationBuffer, const GpuBufferDiff& diff)
+void recordBufferCopies(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, const std::vector<BufferCopyRegion>& regions)
 {
-    if (diff.empty()) {
+    if (regions.empty()) {
         return;
     }
 
-    Buffer stagingBuffer{};
-    stagingBuffer.createBuffer(
-        &instance,
-        storageBufferSize(diff.data),
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+    std::vector<VkBufferCopy> vkRegions;
+    vkRegions.reserve(regions.size());
+    for (const BufferCopyRegion& region : regions) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = region.srcOffset;
+        copyRegion.dstOffset = region.dstOffset;
+        copyRegion.size = region.size;
+        vkRegions.push_back(copyRegion);
+    }
 
-    stagingBuffer.upload(&instance, diff.data.data(), stagingBuffer.size);
-    Buffer::copyBuffer(
-        &instance,
-        stagingBuffer.buffer,
-        destinationBuffer.buffer,
-        byteRegionsFromWordRegions(diff.regions),
-        commandPool
-    );
-    stagingBuffer.cleanup(&instance);
+    vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, static_cast<uint32_t>(vkRegions.size()), vkRegions.data());
 }
 
 void insertImageBarrier(
@@ -239,6 +233,7 @@ void VulkanApp::initVulkan() {
     createImGuiFramebuffers();
     initImGui();
     commandPool.allocateCommandBuffers(&instance, MAX_FRAMES_IN_FLIGHT);
+    deferredUploadResources.resize(MAX_FRAMES_IN_FLIGHT);
     syncManager.init(&instance, swapchain.getSwapImgCount(), MAX_FRAMES_IN_FLIGHT);
 }
 
@@ -504,6 +499,9 @@ void VulkanApp::syncWorldBuffers() {
         requiredChunkBrickMapBufferSize > chunkBrickMapBuffer.size ||
         requiredBrickPoolBufferSize > brickPoolBuffer.size) {
         vkDeviceWaitIdle(instance.device());
+        for (size_t i = 0; i < deferredUploadResources.size(); i++) {
+            cleanupDeferredUploadResources(i);
+        }
         createWorldBuffers();
         createDescriptorSets(false);
         return;
@@ -513,9 +511,72 @@ void VulkanApp::syncWorldBuffers() {
         return;
     }
 
-    uploadBufferDiffWithStaging(instance, commandPool, chunkWindowIndexBuffer, worldDiff.chunkWindowIndices);
-    uploadBufferDiffWithStaging(instance, commandPool, chunkBrickMapBuffer, worldDiff.chunkBrickMaps);
-    uploadBufferDiffWithStaging(instance, commandPool, brickPoolBuffer, worldDiff.brickData);
+    DeferredUploadResources& frameUploads = deferredUploadResources.at(currentFrame);
+
+    const auto queueBufferUpload = [this, &frameUploads](Buffer& destinationBuffer, const GpuBufferDiff& diff) {
+        if (diff.empty()) {
+            return;
+        }
+
+        PendingBufferUpload upload{};
+        upload.destinationBuffer = destinationBuffer.buffer;
+        upload.regions = byteRegionsFromWordRegions(diff.regions);
+        upload.stagingBuffer.createBuffer(
+            &instance,
+            storageBufferSize(diff.data),
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+        upload.stagingBuffer.upload(&instance, diff.data.data(), upload.stagingBuffer.size);
+        frameUploads.pendingUploads.push_back(std::move(upload));
+    };
+
+    queueBufferUpload(chunkWindowIndexBuffer, worldDiff.chunkWindowIndices);
+    queueBufferUpload(chunkBrickMapBuffer, worldDiff.chunkBrickMaps);
+    queueBufferUpload(brickPoolBuffer, worldDiff.brickData);
+}
+
+void VulkanApp::recordPreparedWorldBufferUploads(VkCommandBuffer commandBuffer) {
+    DeferredUploadResources& frameUploads = deferredUploadResources.at(currentFrame);
+    if (frameUploads.pendingUploads.empty()) {
+        return;
+    }
+
+    std::vector<VkBufferMemoryBarrier> bufferBarriers;
+    bufferBarriers.reserve(frameUploads.pendingUploads.size());
+
+    for (const PendingBufferUpload& upload : frameUploads.pendingUploads) {
+        recordBufferCopies(commandBuffer, upload.stagingBuffer.buffer, upload.destinationBuffer, upload.regions);
+
+        VkBufferMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = upload.destinationBuffer;
+        barrier.offset = 0;
+        barrier.size = VK_WHOLE_SIZE;
+        bufferBarriers.push_back(barrier);
+    }
+
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        0, nullptr,
+        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
+        0, nullptr
+    );
+}
+
+void VulkanApp::cleanupDeferredUploadResources(size_t frameIndex) {
+    DeferredUploadResources& frameUploads = deferredUploadResources.at(frameIndex);
+    for (PendingBufferUpload& upload : frameUploads.pendingUploads) {
+        upload.stagingBuffer.cleanup(&instance);
+    }
+    frameUploads.pendingUploads.clear();
 }
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
@@ -638,6 +699,9 @@ void VulkanApp::buildDiagnosticsUi() {
 
 void VulkanApp::cleanup() {
     vkDeviceWaitIdle(instance.device());
+    for (size_t i = 0; i < deferredUploadResources.size(); i++) {
+        cleanupDeferredUploadResources(i);
+    }
     cleanupSwapchain();
     cleanupImGui();
 
@@ -667,6 +731,7 @@ void VulkanApp::drawFrame(const Camera& camera) {
     FrameSyncObjects frameSyncObjects = syncManager.getFrame(currentFrame);
 
     vkWaitForFences(instance.device(), 1, &frameSyncObjects.inFlight, VK_TRUE, UINT64_MAX);
+    cleanupDeferredUploadResources(currentFrame);
     syncWorldBuffers();
 
     uint32_t imageIndex = 0;
@@ -752,6 +817,8 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
 
     Image& computeImage = computeImages[currentFrame];
     const VkExtent2D extent = swapchain.getSwapExtent();
+
+    recordPreparedWorldBufferUploads(commandBuffer);
 
     insertImageBarrier(
         commandBuffer,
