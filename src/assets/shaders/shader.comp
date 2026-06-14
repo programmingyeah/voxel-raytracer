@@ -286,10 +286,49 @@ uint loadBrickVoxel(uint brickBase, ivec3 localVoxel) {
     return (packed >> (8 * (flatIndex & 3))) & 0xFFu;
 }
 
+uvec2 loadBrickCoarseOccupancyWords(uint brickBase) {
+    return uvec2(
+        brickPool.data[brickBase],
+        brickPool.data[brickBase + 1u]
+    );
+}
+
+bool loadBrickCoarseOccupancyCached(uvec2 occupancyWords, ivec3 coarseCell) {
+    uint bitIndex = uint(coarseCellIndex(coarseCell));
+    uint word = bitIndex < 32u ? occupancyWords.x : occupancyWords.y;
+    return ((word >> (bitIndex & 31u)) & 1u) != 0u;
+}
+
+uvec4 loadCoarseCellVoxelWords(uint brickBase, ivec3 cellLocalVoxelMin) {
+    uint voxelBase = brickBase + uint(OCCUPANCY_MASK_WORD_COUNT);
+    uint flatIndex00 = uint(cellLocalVoxelMin.x + BRICK_SIZE * (cellLocalVoxelMin.y + BRICK_SIZE * cellLocalVoxelMin.z));
+    uint flatIndex10 = uint(cellLocalVoxelMin.x + BRICK_SIZE * ((cellLocalVoxelMin.y + 1) + BRICK_SIZE * cellLocalVoxelMin.z));
+    uint flatIndex01 = uint(cellLocalVoxelMin.x + BRICK_SIZE * (cellLocalVoxelMin.y + BRICK_SIZE * (cellLocalVoxelMin.z + 1)));
+    uint flatIndex11 = uint(cellLocalVoxelMin.x + BRICK_SIZE * ((cellLocalVoxelMin.y + 1) + BRICK_SIZE * (cellLocalVoxelMin.z + 1)));
+    return uvec4(
+        brickPool.data[voxelBase + flatIndex00 / 4u],
+        brickPool.data[voxelBase + flatIndex10 / 4u],
+        brickPool.data[voxelBase + flatIndex01 / 4u],
+        brickPool.data[voxelBase + flatIndex11 / 4u]
+    );
+}
+
+uint loadCoarseCellVoxelCached(uvec4 coarseCellVoxelWords, ivec3 cellLocalVoxelMin, ivec3 localVoxelInCell) {
+    uint packedWord = 0u;
+    if (localVoxelInCell.z == 0) {
+        packedWord = localVoxelInCell.y == 0 ? coarseCellVoxelWords.x : coarseCellVoxelWords.y;
+    } else {
+        packedWord = localVoxelInCell.y == 0 ? coarseCellVoxelWords.z : coarseCellVoxelWords.w;
+    }
+
+    uint byteIndex = uint((cellLocalVoxelMin.x + localVoxelInCell.x) & 3);
+    return (packedWord >> (8u * byteIndex)) & 0xFFu;
+}
+
 vec3 normalForAxis(int axis, int stepSign);
 int selectMinAxis(vec3 v);
 
-bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWorldMin, uint brickBase, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
+bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 cellWorldMin, ivec3 cellLocalVoxelMin, uvec4 coarseCellVoxelWords, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
     if (endT <= startT + EPS) {
         return false;
     }
@@ -321,9 +360,8 @@ bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 brickWorldMin, ivec3 cellWo
     for (int i = 0; i < COARSE_CELL_SIZE * COARSE_CELL_SIZE * COARSE_CELL_SIZE; i++) {
         ivec3 localVoxelInCell = voxel - cellWorldMin;
         if (all(greaterThanEqual(localVoxelInCell, ivec3(0))) && all(lessThan(localVoxelInCell, ivec3(COARSE_CELL_SIZE)))) {
-            ivec3 localVoxelInBrick = voxel - brickWorldMin;
             counters.voxelTests++;
-            if (loadBrickVoxel(brickBase, localVoxelInBrick) != AIR_MATERIAL) {
+            if (loadCoarseCellVoxelCached(coarseCellVoxelWords, cellLocalVoxelMin, localVoxelInCell) != AIR_MATERIAL) {
                 hitT = t;
                 hitNormal = currentNormal;
                 return true;
@@ -411,6 +449,7 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
     }
 
     uint brickBase = brickIndex * uint(PACKED_BRICK_WORD_COUNT);
+    uvec2 coarseOccupancyWords = loadBrickCoarseOccupancyWords(brickBase);
 
     vec3 inv = vec3(
         abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
@@ -441,9 +480,11 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
         counters.coarseCellSteps++;
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
-        if (loadBrickCoarseOccupancy(brickBase, localCell)) {
+        if (loadBrickCoarseOccupancyCached(coarseOccupancyWords, localCell)) {
             ivec3 cellWorldMin = brickWorldMin + localCell * COARSE_CELL_SIZE;
-            if (traceOccupiedCoarseCell(ro, rd, brickWorldMin, cellWorldMin, brickBase, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+            ivec3 cellLocalVoxelMin = localCell * COARSE_CELL_SIZE;
+            uvec4 coarseCellVoxelWords = loadCoarseCellVoxelWords(brickBase, cellLocalVoxelMin);
+            if (traceOccupiedCoarseCell(ro, rd, cellWorldMin, cellLocalVoxelMin, coarseCellVoxelWords, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
                 return true;
             }
         }
