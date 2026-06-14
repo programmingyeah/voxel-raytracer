@@ -6,12 +6,45 @@
 #include <utility>
 
 namespace {
+constexpr uint32_t CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
+constexpr uint32_t CHUNK_ACCEL_8_WORD_COUNT = (8u * 8u * 8u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_4_WORD_COUNT = (4u * 4u * 4u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_2_WORD_COUNT = (2u * 2u * 2u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_FLAG_WORD_COUNT = 1u;
+constexpr uint32_t CHUNK_ACCEL_WORD_COUNT =
+    CHUNK_ACCEL_FLAG_WORD_COUNT + CHUNK_ACCEL_8_WORD_COUNT + CHUNK_ACCEL_4_WORD_COUNT + CHUNK_ACCEL_2_WORD_COUNT;
+constexpr uint32_t PACKED_CHUNK_WORD_COUNT = CHUNK_ACCEL_WORD_COUNT + Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+constexpr uint32_t CHUNK_ACCEL_8_OFFSET = CHUNK_ACCEL_FLAG_WORD_COUNT;
+constexpr uint32_t CHUNK_ACCEL_4_OFFSET = CHUNK_ACCEL_8_OFFSET + CHUNK_ACCEL_8_WORD_COUNT;
+constexpr uint32_t CHUNK_ACCEL_2_OFFSET = CHUNK_ACCEL_4_OFFSET + CHUNK_ACCEL_4_WORD_COUNT;
+constexpr uint32_t CHUNK_BRICK_MAP_OFFSET = CHUNK_ACCEL_WORD_COUNT;
+
 BrickMapEntry emptyBrickMapEntry() {
     return BrickMapEntry{BRICK_MAP_EMPTY, AIR_MATERIAL};
 }
 
 void clearDirtyFlags(std::vector<uint8_t>& flags) {
     std::fill(flags.begin(), flags.end(), 0u);
+}
+
+void setPackedBit(std::vector<uint32_t>& words, size_t wordBase, uint32_t bitIndex) {
+    words[wordBase + bitIndex / 32u] |= 1u << (bitIndex % 32u);
+}
+
+uint32_t accelIndex8(uint32_t x, uint32_t y, uint32_t z) {
+    return x + 8u * (y + 8u * z);
+}
+
+uint32_t accelIndex4(uint32_t x, uint32_t y, uint32_t z) {
+    return x + 4u * (y + 4u * z);
+}
+
+uint32_t accelIndex2(uint32_t x, uint32_t y, uint32_t z) {
+    return x + 2u * (y + 2u * z);
+}
+
+bool brickEntryHasRenderableContent(const BrickMapEntry& entry) {
+    return entry.index != BRICK_MAP_EMPTY || entry.materialId != AIR_MATERIAL;
 }
 
 void packBrick(std::vector<uint32_t>& brickData, size_t brickIndex, const Brick& brick) {
@@ -36,6 +69,51 @@ void packBrick(std::vector<uint32_t>& brickData, size_t brickIndex, const Brick&
 void packBrickMapEntry(std::vector<uint32_t>& chunkBrickMaps, size_t packedEntryIndex, const BrickMapEntry& entry) {
     chunkBrickMaps[packedEntryIndex] = entry.index;
     chunkBrickMaps[packedEntryIndex + 1u] = entry.materialId;
+}
+
+void packChunkRecord(
+    std::vector<uint32_t>& chunkBrickMaps,
+    size_t chunkSlotIndex,
+    const Chunk::EncodedBrickMap& brickMap,
+    bool chunkGenerated
+) {
+    const size_t chunkBaseIndex = chunkSlotIndex * PACKED_CHUNK_WORD_COUNT;
+    std::fill_n(
+        chunkBrickMaps.begin() + static_cast<std::ptrdiff_t>(chunkBaseIndex),
+        PACKED_CHUNK_WORD_COUNT,
+        0u
+    );
+
+    if (!chunkGenerated) {
+        chunkBrickMaps[chunkBaseIndex] = CHUNK_ACCEL_EMPTY_FLAG;
+        return;
+    }
+
+    bool chunkEmpty = true;
+    for (uint32_t brickZ = 0; brickZ < Chunk::BRICKS_PER_AXIS; brickZ++) {
+        for (uint32_t brickY = 0; brickY < Chunk::BRICKS_PER_AXIS; brickY++) {
+            for (uint32_t brickX = 0; brickX < Chunk::BRICKS_PER_AXIS; brickX++) {
+                const uint32_t brickMapIndex = brickX + Chunk::BRICKS_PER_AXIS * (brickY + Chunk::BRICKS_PER_AXIS * brickZ);
+                const BrickMapEntry entry = brickMap[brickMapIndex];
+                const size_t entryBaseIndex = chunkBaseIndex + CHUNK_BRICK_MAP_OFFSET +
+                    static_cast<size_t>(brickMapIndex) * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+                packBrickMapEntry(chunkBrickMaps, entryBaseIndex, entry);
+
+                if (!brickEntryHasRenderableContent(entry)) {
+                    continue;
+                }
+
+                chunkEmpty = false;
+                setPackedBit(chunkBrickMaps, chunkBaseIndex + CHUNK_ACCEL_8_OFFSET, accelIndex8(brickX / 2u, brickY / 2u, brickZ / 2u));
+                setPackedBit(chunkBrickMaps, chunkBaseIndex + CHUNK_ACCEL_4_OFFSET, accelIndex4(brickX / 4u, brickY / 4u, brickZ / 4u));
+                setPackedBit(chunkBrickMaps, chunkBaseIndex + CHUNK_ACCEL_2_OFFSET, accelIndex2(brickX / 8u, brickY / 8u, brickZ / 8u));
+            }
+        }
+    }
+
+    if (chunkEmpty) {
+        chunkBrickMaps[chunkBaseIndex] = CHUNK_ACCEL_EMPTY_FLAG;
+    }
 }
 
 std::vector<std::pair<size_t, size_t>> buildDirtySpans(const std::vector<uint8_t>& dirtyFlags) {
@@ -70,20 +148,14 @@ GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world) {
     GpuVoxelBuffers gpuBuffers;
 
     gpuBuffers.chunkWindowIndices = world.window;
-    gpuBuffers.chunkBrickMaps.resize(world.slots.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT);
+    gpuBuffers.chunkBrickMaps.resize(world.slots.size() * PACKED_CHUNK_WORD_COUNT);
     for (size_t chunkSlotIndex = 0; chunkSlotIndex < world.slots.size(); chunkSlotIndex++) {
-        const auto& brickMap = world.slots[chunkSlotIndex].chunk.getBrickMap();
-        const size_t chunkBaseIndex = chunkSlotIndex * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-        const bool chunkGenerated = world.isChunkSlotGenerated(chunkSlotIndex);
-
-        for (size_t brickIndex = 0; brickIndex < Chunk::BRICK_COUNT; brickIndex++) {
-            const size_t entryBaseIndex = chunkBaseIndex + brickIndex * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-            packBrickMapEntry(
-                gpuBuffers.chunkBrickMaps,
-                entryBaseIndex,
-                chunkGenerated ? brickMap[brickIndex] : emptyBrickMapEntry()
-            );
-        }
+        packChunkRecord(
+            gpuBuffers.chunkBrickMaps,
+            chunkSlotIndex,
+            world.slots[chunkSlotIndex].chunk.getBrickMap(),
+            world.isChunkSlotGenerated(chunkSlotIndex)
+        );
     }
 
     gpuBuffers.brickData.assign(world.brickPool.bricks.size() * PACKED_BRICK_WORD_COUNT, 0u);
@@ -99,7 +171,7 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
 
     GpuWorldDiff worldDiff{};
     worldDiff.chunkWindowIndices.totalWordCount = world.window.size();
-    worldDiff.chunkBrickMaps.totalWordCount = world.slots.size() * Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+    worldDiff.chunkBrickMaps.totalWordCount = world.slots.size() * PACKED_CHUNK_WORD_COUNT;
     worldDiff.brickData.totalWordCount = world.brickPool.bricks.size() * PACKED_BRICK_WORD_COUNT;
 
     for (const auto& span : buildDirtySpans(world.dirty.window)) {
@@ -116,24 +188,23 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
     }
 
     for (const auto& span : buildDirtySpans(world.dirty.brickMaps)) {
-        const size_t spanStartEntry = span.first;
-        const size_t spanEntryCount = span.second;
-        const size_t dstWordOffset = spanStartEntry * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-        const size_t wordCount = spanEntryCount * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+        const size_t spanStartChunk = span.first;
+        const size_t spanChunkCount = span.second;
+        const size_t dstWordOffset = spanStartChunk * PACKED_CHUNK_WORD_COUNT;
+        const size_t wordCount = spanChunkCount * PACKED_CHUNK_WORD_COUNT;
         const size_t srcWordOffset = worldDiff.chunkBrickMaps.data.size();
 
         worldDiff.chunkBrickMaps.data.resize(srcWordOffset + wordCount, 0u);
         worldDiff.chunkBrickMaps.regions.push_back({srcWordOffset, dstWordOffset, wordCount});
 
-        for (size_t entryOffset = 0; entryOffset < spanEntryCount; entryOffset++) {
-            const size_t globalEntryIndex = spanStartEntry + entryOffset;
-            const size_t chunkSlotIndex = globalEntryIndex / Chunk::BRICK_COUNT;
-            const size_t brickIndex = globalEntryIndex % Chunk::BRICK_COUNT;
-            const size_t packedEntryIndex = srcWordOffset + entryOffset * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-            const BrickMapEntry entry = world.isChunkSlotGenerated(chunkSlotIndex)
-                ? world.slots[chunkSlotIndex].chunk.getBrickMap()[brickIndex]
-                : emptyBrickMapEntry();
-            packBrickMapEntry(worldDiff.chunkBrickMaps.data, packedEntryIndex, entry);
+        for (size_t chunkOffset = 0; chunkOffset < spanChunkCount; chunkOffset++) {
+            const size_t chunkSlotIndex = spanStartChunk + chunkOffset;
+            packChunkRecord(
+                worldDiff.chunkBrickMaps.data,
+                srcWordOffset / PACKED_CHUNK_WORD_COUNT + chunkOffset,
+                world.slots[chunkSlotIndex].chunk.getBrickMap(),
+                world.isChunkSlotGenerated(chunkSlotIndex)
+            );
         }
     }
 

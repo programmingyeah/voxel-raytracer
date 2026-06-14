@@ -42,6 +42,17 @@ const uint AIR_MATERIAL = 0u;
 const uint STONE_MATERIAL = 1u;
 const uint BRICK_MAP_EMPTY = 0xFFFFFFFFu;
 const uint BRICK_MAP_ENTRY_WORD_COUNT = 2u;
+const uint CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
+const uint CHUNK_ACCEL_8_WORD_COUNT = 16u;
+const uint CHUNK_ACCEL_4_WORD_COUNT = 2u;
+const uint CHUNK_ACCEL_2_WORD_COUNT = 1u;
+const uint CHUNK_ACCEL_FLAG_WORD_COUNT = 1u;
+const uint CHUNK_ACCEL_WORD_COUNT = CHUNK_ACCEL_FLAG_WORD_COUNT + CHUNK_ACCEL_8_WORD_COUNT + CHUNK_ACCEL_4_WORD_COUNT + CHUNK_ACCEL_2_WORD_COUNT;
+const uint CHUNK_ACCEL_8_OFFSET = CHUNK_ACCEL_FLAG_WORD_COUNT;
+const uint CHUNK_ACCEL_4_OFFSET = CHUNK_ACCEL_8_OFFSET + CHUNK_ACCEL_8_WORD_COUNT;
+const uint CHUNK_ACCEL_2_OFFSET = CHUNK_ACCEL_4_OFFSET + CHUNK_ACCEL_4_WORD_COUNT;
+const uint CHUNK_BRICK_MAP_OFFSET = CHUNK_ACCEL_WORD_COUNT;
+const uint CHUNK_RECORD_WORD_COUNT = CHUNK_ACCEL_WORD_COUNT + uint(BRICK_COUNT) * BRICK_MAP_ENTRY_WORD_COUNT;
 
 struct RayQueryCounters {
     int chunkSteps;
@@ -193,13 +204,35 @@ int brickIndex(ivec3 brickCoord) {
     return brickCoord.x + BRICKS_PER_AXIS * (brickCoord.y + BRICKS_PER_AXIS * brickCoord.z);
 }
 
-uint loadChunkBrickMapBase(ivec3 localChunkCoord) {
+uint loadChunkRecordBase(ivec3 localChunkCoord) {
     uint chunkPoolIndex = chunkWindowIndices.data[chunkIndex(localChunkCoord)];
-    return chunkPoolIndex * uint(BRICK_COUNT) * BRICK_MAP_ENTRY_WORD_COUNT;
+    return chunkPoolIndex * CHUNK_RECORD_WORD_COUNT;
 }
 
-uvec2 loadBrickEntry(uint chunkBrickMapBase, ivec3 brickCoord) {
-    uint packedEntryIndex = chunkBrickMapBase + uint(brickIndex(brickCoord)) * BRICK_MAP_ENTRY_WORD_COUNT;
+bool chunkIsEmpty(uint chunkRecordBase) {
+    return (chunkBrickMaps.data[chunkRecordBase] & CHUNK_ACCEL_EMPTY_FLAG) != 0u;
+}
+
+bool loadChunkAccelOccupancy(uint chunkRecordBase, uint wordOffset, int cellsPerAxis, ivec3 cellCoord) {
+    uint bitIndex = uint(cellCoord.x + cellsPerAxis * (cellCoord.y + cellsPerAxis * cellCoord.z));
+    uint word = chunkBrickMaps.data[chunkRecordBase + wordOffset + bitIndex / 32u];
+    return ((word >> (bitIndex & 31u)) & 1u) != 0u;
+}
+
+bool loadChunkAccelOccupancy8(uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_8_OFFSET, 8, cellCoord);
+}
+
+bool loadChunkAccelOccupancy4(uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_4_OFFSET, 4, cellCoord);
+}
+
+bool loadChunkAccelOccupancy2(uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_2_OFFSET, 2, cellCoord);
+}
+
+uvec2 loadBrickEntry(uint chunkRecordBase, ivec3 brickCoord) {
+    uint packedEntryIndex = chunkRecordBase + CHUNK_BRICK_MAP_OFFSET + uint(brickIndex(brickCoord)) * BRICK_MAP_ENTRY_WORD_COUNT;
     return uvec2(
         chunkBrickMaps.data[packedEntryIndex],
         chunkBrickMaps.data[packedEntryIndex + 1u]
@@ -428,7 +461,28 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
     return false;
 }
 
-bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+bool advanceDdaCell(inout ivec3 cell, ivec3 step, ivec3 cellMin, ivec3 cellMaxExclusive, inout vec3 tMax, vec3 tDelta, out float nextT, out vec3 crossedNormal) {
+    int axis = selectMinAxis(tMax);
+    nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+
+    if (axis == 0) {
+        cell.x += step.x;
+        tMax.x += tDelta.x;
+        crossedNormal = normalForAxis(0, step.x);
+    } else if (axis == 1) {
+        cell.y += step.y;
+        tMax.y += tDelta.y;
+        crossedNormal = normalForAxis(1, step.y);
+    } else {
+        cell.z += step.z;
+        tMax.z += tDelta.z;
+        crossedNormal = normalForAxis(2, step.z);
+    }
+
+    return all(greaterThanEqual(cell, cellMin)) && all(lessThan(cell, cellMaxExclusive));
+}
+
+bool traceChunkBrickRange(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 brickMin, ivec3 brickMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
     if (endT <= startT + EPS) {
         return false;
     }
@@ -441,13 +495,10 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
     vec3 tDelta = abs(vec3(BRICK_SIZE) * inv);
 
-    ivec3 chunkWorldMin = chunkCoord * CHUNK_SIZE;
-    ivec3 localChunkCoord = chunkCoord - worldChunkMin();
-    uint chunkBrickMapBase = loadChunkBrickMapBase(localChunkCoord);
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
     ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE)));
-    localBrick = clamp(localBrick, ivec3(0), ivec3(BRICKS_PER_AXIS - 1));
+    localBrick = clamp(localBrick, brickMin, brickMaxExclusive - ivec3(1));
     vec3 currentNormal = entryNormal;
 
     vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
@@ -461,9 +512,10 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
         (nextBoundary.z - ro.z) * inv.z
     );
 
-    for (int i = 0; i < BRICK_COUNT; i++) {
+    int maxBrickSteps = (brickMaxExclusive.x - brickMin.x) * (brickMaxExclusive.y - brickMin.y) * (brickMaxExclusive.z - brickMin.z);
+    for (int i = 0; i < maxBrickSteps; i++) {
         counters.brickSteps++;
-        uvec2 entry = loadBrickEntry(chunkBrickMapBase, localBrick);
+        uvec2 entry = loadBrickEntry(chunkRecordBase, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
         if (!brickEntryHasBrick(entry)) {
@@ -481,32 +533,220 @@ bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, ve
             }
         }
 
-        int axis = selectMinAxis(tMax);
-        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
-        if (nextT >= endT) {
-            break;
-        }
-
-        if (axis == 0) {
-            localBrick.x += step.x;
-            tMax.x += tDelta.x;
-        } else if (axis == 1) {
-            localBrick.y += step.y;
-            tMax.y += tDelta.y;
-        } else {
-            localBrick.z += step.z;
-            tMax.z += tDelta.z;
-        }
-
-        if (any(lessThan(localBrick, ivec3(0))) || any(greaterThanEqual(localBrick, ivec3(BRICKS_PER_AXIS)))) {
+        float nextT = 0.0;
+        vec3 crossedNormal = vec3(0.0);
+        if (!advanceDdaCell(localBrick, step, brickMin, brickMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
             break;
         }
 
         t = nextT;
-        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+        currentNormal = crossedNormal;
     }
 
     return false;
+}
+
+bool traceChunkAccel8(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    const int CELL_BRICKS = 2;
+
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
+    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
+        float(step.x > 0 ? localCell.x + 1 : localCell.x),
+        float(step.y > 0 ? localCell.y + 1 : localCell.y),
+        float(step.z > 0 ? localCell.z + 1 : localCell.z)
+    ) * float(BRICK_SIZE * CELL_BRICKS);
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
+    for (int i = 0; i < maxCellSteps; i++) {
+        counters.brickSteps++;
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+
+        if (loadChunkAccelOccupancy8(chunkRecordBase, localCell)) {
+            ivec3 brickMin = localCell * CELL_BRICKS;
+            ivec3 brickMaxExclusive = brickMin + ivec3(CELL_BRICKS);
+            if (traceChunkBrickRange(ro, rd, chunkWorldMin, chunkRecordBase, brickMin, brickMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
+                return true;
+            }
+        }
+
+        float nextT = 0.0;
+        vec3 crossedNormal = vec3(0.0);
+        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = crossedNormal;
+    }
+
+    return false;
+}
+
+bool traceChunkAccel4(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    const int CELL_BRICKS = 4;
+
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
+    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
+        float(step.x > 0 ? localCell.x + 1 : localCell.x),
+        float(step.y > 0 ? localCell.y + 1 : localCell.y),
+        float(step.z > 0 ? localCell.z + 1 : localCell.z)
+    ) * float(BRICK_SIZE * CELL_BRICKS);
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
+    for (int i = 0; i < maxCellSteps; i++) {
+        counters.brickSteps++;
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+
+        if (loadChunkAccelOccupancy4(chunkRecordBase, localCell)) {
+            ivec3 childCellMin = localCell * 2;
+            ivec3 childCellMaxExclusive = childCellMin + ivec3(2);
+            if (traceChunkAccel8(ro, rd, chunkWorldMin, chunkRecordBase, childCellMin, childCellMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
+                return true;
+            }
+        }
+
+        float nextT = 0.0;
+        vec3 crossedNormal = vec3(0.0);
+        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = crossedNormal;
+    }
+
+    return false;
+}
+
+bool traceChunkAccel2(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    const int CELL_BRICKS = 8;
+
+    vec3 inv = vec3(
+        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
+        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
+        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
+    );
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
+    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
+        float(step.x > 0 ? localCell.x + 1 : localCell.x),
+        float(step.y > 0 ? localCell.y + 1 : localCell.y),
+        float(step.z > 0 ? localCell.z + 1 : localCell.z)
+    ) * float(BRICK_SIZE * CELL_BRICKS);
+    vec3 tMax = vec3(
+        (nextBoundary.x - ro.x) * inv.x,
+        (nextBoundary.y - ro.y) * inv.y,
+        (nextBoundary.z - ro.z) * inv.z
+    );
+
+    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
+    for (int i = 0; i < maxCellSteps; i++) {
+        counters.brickSteps++;
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+
+        if (loadChunkAccelOccupancy2(chunkRecordBase, localCell)) {
+            ivec3 childCellMin = localCell * 2;
+            ivec3 childCellMaxExclusive = childCellMin + ivec3(2);
+            if (traceChunkAccel4(ro, rd, chunkWorldMin, chunkRecordBase, childCellMin, childCellMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
+                return true;
+            }
+        }
+
+        float nextT = 0.0;
+        vec3 crossedNormal = vec3(0.0);
+        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = crossedNormal;
+    }
+
+    return false;
+}
+
+bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    ivec3 chunkWorldMin = chunkCoord * CHUNK_SIZE;
+    ivec3 localChunkCoord = chunkCoord - worldChunkMin();
+    uint chunkRecordBase = loadChunkRecordBase(localChunkCoord);
+    if (chunkIsEmpty(chunkRecordBase)) {
+        return false;
+    }
+
+    return traceChunkAccel2(
+        ro,
+        rd,
+        chunkWorldMin,
+        chunkRecordBase,
+        ivec3(0),
+        ivec3(2),
+        startT,
+        endT,
+        entryNormal,
+        counters,
+        hitT,
+        hitNormal,
+        hitMaterialId
+    );
 }
 
 bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {

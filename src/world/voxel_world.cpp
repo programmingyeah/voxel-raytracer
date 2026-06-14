@@ -56,7 +56,7 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
     }
 
     dirty.window.assign(totalChunkCount, 0u);
-    dirty.brickMaps.assign(slots.size() * Chunk::BRICK_COUNT, 0u);
+    dirty.brickMaps.assign(slots.size(), 0u);
     dirty.brickPool.assign(brickPool.bricks.size(), 0u);
 }
 
@@ -248,13 +248,13 @@ void VoxelWorld::releaseBrick(uint32_t brickIndex) {
 }
 
 void VoxelWorld::onChunkBrickMapDirty(size_t dirtyChunkIndex, uint32_t mapIndex) {
-    const size_t globalEntryIndex = dirtyChunkIndex * Chunk::BRICK_COUNT + mapIndex;
-    if (globalEntryIndex >= dirty.brickMaps.size()) {
+    (void)mapIndex;
+    if (dirtyChunkIndex >= dirty.brickMaps.size()) {
         return;
     }
 
     std::lock_guard<std::mutex> dirtyLock(dirtyStateMutex);
-    dirty.brickMaps[globalEntryIndex] = 1u;
+    dirty.brickMaps[dirtyChunkIndex] = 1u;
 }
 
 void VoxelWorld::onBrickPoolDirty(uint32_t brickIndex) {
@@ -304,8 +304,7 @@ void VoxelWorld::publishChunkGeneration(uint32_t chunkSlotIndex, uint64_t solidV
     std::lock_guard<std::mutex> dirtyLock(dirtyStateMutex);
     std::lock_guard<std::mutex> stateLock(chunkStateMutex);
 
-    const size_t chunkBaseIndex = static_cast<size_t>(chunkSlotIndex) * Chunk::BRICK_COUNT;
-    std::fill_n(dirty.brickMaps.begin() + static_cast<std::ptrdiff_t>(chunkBaseIndex), Chunk::BRICK_COUNT, 1u);
+    dirty.brickMaps[chunkSlotIndex] = 1u;
 
     for (uint32_t brickIndex : touchedBrickIndices) {
         if (brickIndex < dirty.brickPool.size()) {
