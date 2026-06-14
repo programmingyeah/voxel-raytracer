@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "../world/world_upload.hpp"
 #include <cassert>
 #include <cstdio>
 #include <stdexcept>
@@ -447,11 +448,11 @@ void VulkanApp::createWorldBuffers() {
         throw std::runtime_error("voxel world must be set before creating world buffers");
     }
 
-    const GpuVoxelBuffers gpuBuffers = world->buildGpuBuffers();
+    const GpuVoxelBuffers gpuBuffers = buildGpuVoxelBuffers(*world);
     const VkDeviceSize chunkWindowIndexBufferSize = storageBufferSize(gpuBuffers.chunkWindowIndices);
     const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
     const VkDeviceSize brickPoolBufferSize = storageBufferSize(
-        world->getExplicitBrickCapacity() * PACKED_BRICK_WORD_COUNT
+        world->getBrickCapacity() * PACKED_BRICK_WORD_COUNT
     );
 
     if (chunkWindowIndexBuffer.buffer != VK_NULL_HANDLE) {
@@ -486,7 +487,7 @@ void VulkanApp::createWorldBuffers() {
     uploadBufferWithStaging(instance, commandPool, chunkWindowIndexBuffer, gpuBuffers.chunkWindowIndices);
     uploadBufferWithStaging(instance, commandPool, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
     uploadBufferWithStaging(instance, commandPool, brickPoolBuffer, gpuBuffers.brickData);
-    world->clearDirtyState();
+    clearGpuUploadDirtyState(*world);
 }
 
 void VulkanApp::syncWorldBuffers() {
@@ -494,7 +495,7 @@ void VulkanApp::syncWorldBuffers() {
         return;
     }
 
-    const GpuWorldDiff worldDiff = world->buildGpuBufferDiffs();
+    const GpuWorldDiff worldDiff = buildGpuWorldDiff(*world);
     const VkDeviceSize requiredChunkWindowIndexBufferSize = storageBufferSize(worldDiff.chunkWindowIndices.totalWordCount);
     const VkDeviceSize requiredChunkBrickMapBufferSize = storageBufferSize(worldDiff.chunkBrickMaps.totalWordCount);
     const VkDeviceSize requiredBrickPoolBufferSize = storageBufferSize(worldDiff.brickData.totalWordCount);
@@ -593,8 +594,8 @@ void VulkanApp::buildDiagnosticsUi() {
     const size_t chunkCount = world != nullptr ? world->getChunkCount() : 0;
     const size_t generatedChunkCount = world != nullptr ? world->getGeneratedChunkCount() : 0;
     const uint64_t worldVoxelCount = static_cast<uint64_t>(chunkCount) * Chunk::VOXEL_COUNT;
-    const size_t allocatedBrickCount = world != nullptr ? world->getAllocatedExplicitBrickCount() : 0;
-    const size_t brickCapacity = world != nullptr ? world->getExplicitBrickCapacity() : 0;
+    const size_t allocatedBrickCount = world != nullptr ? world->getAllocatedBrickCount() : 0;
+    const size_t brickCapacity = world != nullptr ? world->getBrickCapacity() : 0;
     const VkDeviceSize worldBufferBytes = chunkBrickMapBuffer.size + brickPoolBuffer.size;
 
     const std::string worldBufferSize = formatByteSize(worldBufferBytes);

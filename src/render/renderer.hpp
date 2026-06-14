@@ -47,8 +47,7 @@ private:
     VkPipeline computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
     bool framebufferResized = false;
-    const uint32_t WIDTH = 800;
-    const uint32_t HEIGHT = 600;
+    static constexpr uint32_t WIDTH = 800, HEIGHT = 600;
     static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
     int currentFrame = 0;

@@ -2,9 +2,12 @@
 
 #include "voxel_world.hpp"
 
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <optional>
-#include <vector>
+#include <queue>
+#include <thread>
 
 struct WorldGenerationStats {
     uint64_t solidVoxelCount = 0;
@@ -14,7 +17,26 @@ struct WorldGenerationStats {
 
 class WorldGenerator {
 public:
-    WorldGenerationStats generateTerrain(VoxelWorld& world) const;
-    WorldGenerationStats generateTerrain(VoxelWorld& world, const std::vector<uint32_t>& localChunkWindowIndices) const;
-    std::optional<WorldGenerationStats> generateNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ) const;
+    WorldGenerator();
+    ~WorldGenerator();
+    WorldGenerator(const WorldGenerator&) = delete;
+    WorldGenerator& operator=(const WorldGenerator&) = delete;
+    WorldGenerator(WorldGenerator&&) = delete;
+    WorldGenerator& operator=(WorldGenerator&&) = delete;
+
+    void requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ, glm::vec3 viewForward);
+    std::optional<WorldGenerationStats> consumeCompletedGeneration();
+
+private:
+    struct GenerationJob { VoxelWorld* world = nullptr; uint32_t chunkSlotIndex = 0; glm::uvec3 voxelDimensions{}; };
+
+    void workerMain();
+
+    std::thread workerThread;
+    std::mutex queueMutex;
+    std::condition_variable queueCondition;
+    std::queue<GenerationJob> pendingJobs;
+    std::queue<WorldGenerationStats> completedStats;
+    bool stopRequested = false;
+    bool workerBusy = false;
 };

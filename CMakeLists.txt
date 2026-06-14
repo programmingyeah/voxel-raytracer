@@ -13,6 +13,9 @@ find_package(Vulkan REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_search_module(GLFW REQUIRED glfw3)
 
+# Threads
+find_package(Threads REQUIRED)
+
 # GLM
 find_path(GLM_INCLUDE_DIR glm/glm.hpp REQUIRED)
 
@@ -90,6 +93,7 @@ target_include_directories(voxel_tracer PRIVATE
 target_link_libraries(voxel_tracer
     ${Vulkan_LIBRARIES}
     ${GLFW_LIBRARIES}
+    Threads::Threads
     dl
 )
 

@@ -11,11 +11,14 @@
 // in the future we will use a fixed size buffer and dynamically evict bricks based on usage, optimization is not the goal yet
 
 namespace {
+//settings
 constexpr uint32_t RENDER_DISTANCE = 5;
 constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
+
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
 constexpr float PLACE_VOXEL_STEP = 0.25f;
 
+//helper functions
 glm::uvec3 worldChunkCounts() {
     return glm::uvec3(
         2u * RENDER_DISTANCE + 1u,
@@ -23,9 +26,6 @@ glm::uvec3 worldChunkCounts() {
         2u * RENDER_DISTANCE + 1u
     );
 }
-
-GLFWwindow* window = nullptr;
-VulkanApp renderer;
 
 glm::ivec2 chunkXZFromPosition(const glm::vec3& position) {
     const glm::vec3 chunkPosition = glm::floor(position / static_cast<float>(Chunk::SIZE));
@@ -81,6 +81,10 @@ bool tryPlaceStoneVoxel(VoxelWorld& world, const Camera& camera) {
     return false;
 }
 
+//main
+GLFWwindow* window = nullptr;
+VulkanApp renderer;
+
 void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera) {
     auto previousTime = std::chrono::steady_clock::now();
     bool rightMousePressedLastFrame = false;
@@ -94,8 +98,9 @@ void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera)
         camera.update(window, deltaTimeSeconds);
 
         const glm::ivec2 focusChunkXZ = chunkXZFromPosition(camera.getPosition());
-        world.centerChunkWindowXZ(focusChunkXZ);
-        if (const auto generationStats = worldGenerator.generateNextChunk(world, focusChunkXZ); generationStats.has_value()) {
+        world.centerChunkWindow(focusChunkXZ);
+        worldGenerator.requestNextChunk(world, focusChunkXZ, camera.getForward());
+        if (const auto generationStats = worldGenerator.consumeCompletedGeneration(); generationStats.has_value()) {
             renderer.setWorldStats(*generationStats);
         }
 
@@ -117,7 +122,7 @@ int main() {
         VoxelWorld world(worldChunkCounts());
         WorldGenerator worldGenerator;
         Camera camera(glm::vec3(320.0f, 160.0f, 256.0f));
-        world.centerChunkWindowXZ(chunkXZFromPosition(camera.getPosition()));
+        world.centerChunkWindow(chunkXZFromPosition(camera.getPosition()));
         const WorldGenerationStats worldStats{};
 
         window = renderer.init(world, worldStats);

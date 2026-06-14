@@ -1,233 +1,124 @@
 #include "world_gen.hpp"
 
-#include "materials.hpp"
-#include "terrain_noise.hpp"
+#include "chunk_selection.hpp"
+#include "terrain_builder.hpp"
 
 #include <chrono>
-#include <cstdint>
-#include <limits>
+#include <iostream>
 #include <optional>
-#include <vector>
 
 namespace {
-struct BrickClassification {
-    bool isAllAir = true;
-    bool isAllSolid = true;
-};
-
-size_t columnIndex(uint32_t x, uint32_t z) {
-    return static_cast<size_t>(x) + static_cast<size_t>(Chunk::SIZE) * z;
-}
-
-void sampleChunkColumnHeights(
-    std::vector<uint32_t>& columnHeights,
-    glm::ivec3 chunkCoordinate,
-    const glm::uvec3& voxelDimensions
-) {
-    for (uint32_t localZ = 0; localZ < Chunk::SIZE; localZ++) {
-        const int32_t worldZ = chunkCoordinate.z * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localZ);
-
-        for (uint32_t localX = 0; localX < Chunk::SIZE; localX++) {
-            const int32_t worldX = chunkCoordinate.x * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localX);
-            const glm::vec2 samplePosition(
-                static_cast<float>(worldX),
-                static_cast<float>(worldZ)
-            );
-
-            columnHeights[columnIndex(localX, localZ)] = static_cast<uint32_t>(
-                sampleTerrainHeight(samplePosition, voxelDimensions)
-            );
-        }
-    }
-}
-
-BrickClassification classifyBrick(
-    const std::vector<uint32_t>& columnHeights,
-    uint32_t brickBaseLocalX,
-    uint32_t brickBaseLocalZ,
-    uint32_t brickMinWorldY,
-    uint32_t brickMaxWorldY
-) {
-    BrickClassification classification{};
-
-    for (uint32_t localZ = 0; localZ < BRICK_SIZE; localZ++) {
-        for (uint32_t localX = 0; localX < BRICK_SIZE; localX++) {
-            const uint32_t maxSolidWorldY = columnHeights[columnIndex(
-                brickBaseLocalX + localX,
-                brickBaseLocalZ + localZ
-            )];
-
-            if (maxSolidWorldY >= brickMinWorldY) {
-                classification.isAllAir = false;
-            }
-            if (maxSolidWorldY < brickMaxWorldY) {
-                classification.isAllSolid = false;
-            }
-        }
-    }
-
-    return classification;
-}
-
-uint64_t buildMixedBrick(
-    Brick& brick,
-    const std::vector<uint32_t>& columnHeights,
-    uint32_t brickBaseLocalX,
-    uint32_t brickBaseLocalZ,
-    uint32_t brickMinWorldY
-) {
-    uint64_t solidVoxelCount = 0;
-
-    for (uint32_t localZ = 0; localZ < BRICK_SIZE; localZ++) {
-        for (uint32_t localX = 0; localX < BRICK_SIZE; localX++) {
-            const uint32_t maxSolidWorldY = columnHeights[columnIndex(
-                brickBaseLocalX + localX,
-                brickBaseLocalZ + localZ
-            )];
-
-            for (uint32_t localY = 0; localY < BRICK_SIZE; localY++) {
-                const uint32_t worldY = brickMinWorldY + localY;
-                const uint8_t voxelValue = worldY <= maxSolidWorldY ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
-                brick.voxels[localX][localY][localZ] = voxelValue;
-                solidVoxelCount += voxelValue != BRICK_EMPTY_VOXEL;
-            }
-        }
-    }
-
-    Chunk::recomputeOccupancyMask(brick);
-    return solidVoxelCount;
-}
-
-uint64_t generateChunkTerrain(Chunk& chunk, const glm::uvec3& voxelDimensions, std::vector<uint32_t>& columnHeights) {
-    uint64_t solidVoxelCount = 0;
-    chunk.clear();
-
-    const glm::ivec3 chunkCoordinate = chunk.getChunkCoordinate();
-    sampleChunkColumnHeights(columnHeights, chunkCoordinate, voxelDimensions);
-
-    const uint32_t chunkBaseWorldY = static_cast<uint32_t>(chunkCoordinate.y) * Chunk::SIZE;
-
-    for (uint32_t brickZ = 0; brickZ < Chunk::BRICKS_PER_AXIS; brickZ++) {
-        const uint32_t brickBaseLocalZ = brickZ * BRICK_SIZE;
-
-        for (uint32_t brickY = 0; brickY < Chunk::BRICKS_PER_AXIS; brickY++) {
-            const uint32_t brickBaseLocalY = brickY * BRICK_SIZE;
-            const uint32_t brickMinWorldY = chunkBaseWorldY + brickBaseLocalY;
-            const uint32_t brickMaxWorldY = brickMinWorldY + BRICK_SIZE - 1u;
-
-            for (uint32_t brickX = 0; brickX < Chunk::BRICKS_PER_AXIS; brickX++) {
-                const uint32_t brickBaseLocalX = brickX * BRICK_SIZE;
-                const BrickClassification classification = classifyBrick(
-                    columnHeights,
-                    brickBaseLocalX,
-                    brickBaseLocalZ,
-                    brickMinWorldY,
-                    brickMaxWorldY
-                );
-
-                if (classification.isAllAir) {
-                    chunk.setBrickUniform(brickX, brickY, brickZ, AIR_MATERIAL);
-                    continue;
-                }
-
-                if (classification.isAllSolid) {
-                    chunk.setBrickUniform(brickX, brickY, brickZ, STONE_MATERIAL);
-                    solidVoxelCount += BRICK_VOXEL_COUNT;
-                    continue;
-                }
-
-                Brick brick{};
-                solidVoxelCount += buildMixedBrick(
-                    brick,
-                    columnHeights,
-                    brickBaseLocalX,
-                    brickBaseLocalZ,
-                    brickMinWorldY
-                );
-
-                chunk.setBrickExplicit(brickX, brickY, brickZ, STONE_MATERIAL, brick);
-            }
-        }
-    }
-
-    return solidVoxelCount;
-}
-
-WorldGenerationStats generateChunkWindowIndices(
-    VoxelWorld& world,
-    const glm::uvec3& voxelDimensions,
-    const std::vector<uint32_t>& localChunkWindowIndices
-) {
+WorldGenerationStats generateChunkOnWorker(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions) {
     WorldGenerationStats stats{};
     const auto generationStart = std::chrono::steady_clock::now();
-    std::vector<uint32_t> columnHeights(static_cast<size_t>(Chunk::SIZE) * Chunk::SIZE);
-    double accumulatedChunkGenerationMs = 0.0;
+    TerrainBuildResult buildResult{};
 
-    for (uint32_t localWindowIndex : localChunkWindowIndices) {
-        const auto chunkStart = std::chrono::steady_clock::now();
-        Chunk& chunk = world.getChunkByWindowIndex(localWindowIndex);
-        const uint64_t solidVoxelCount = generateChunkTerrain(chunk, voxelDimensions, columnHeights);
-        world.setChunkSolidVoxelCountByWindowIndex(localWindowIndex, solidVoxelCount);
-        world.setChunkGeneratedByWindowIndex(localWindowIndex, true);
-
-        accumulatedChunkGenerationMs += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - chunkStart
+    try {
+        const auto chunkBuildStart = std::chrono::steady_clock::now();
+        buildTerrainChunk(world, chunkSlotIndex, voxelDimensions, buildResult);
+        stats.averageChunkGenerationMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - chunkBuildStart
         ).count();
+        world.publishChunkGeneration(chunkSlotIndex, buildResult.solidVoxelCount, buildResult.allocatedBrickIndices);
+        stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - generationStart
+        ).count();
+        stats.solidVoxelCount = world.getTotalSolidVoxelCount();
+        return stats;
+    } catch (...) {
+        world.abortChunkGeneration(chunkSlotIndex, buildResult.allocatedBrickIndices);
+        throw;
     }
-
-    if (!localChunkWindowIndices.empty()) {
-        stats.averageChunkGenerationMs = accumulatedChunkGenerationMs / static_cast<double>(localChunkWindowIndices.size());
-    }
-
-    stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - generationStart
-    ).count();
-    stats.solidVoxelCount = world.getTotalSolidVoxelCount();
-    return stats;
+}
 }
 
-std::optional<uint32_t> findNearestUngeneratedChunkWindowIndex(VoxelWorld& world, glm::ivec2 focusChunkXZ) {
-    std::optional<uint32_t> bestIndex;
-    int64_t bestDistanceSquared = std::numeric_limits<int64_t>::max();
+WorldGenerator::WorldGenerator() : workerThread(&WorldGenerator::workerMain, this) {}
 
-    for (size_t localWindowIndex = 0; localWindowIndex < world.getChunkCount(); localWindowIndex++) {
-        if (world.isChunkGeneratedByWindowIndex(localWindowIndex)) {
-            continue;
+WorldGenerator::~WorldGenerator() {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        stopRequested = true;
+    }
+    queueCondition.notify_all();
+
+    if (workerThread.joinable()) {
+        workerThread.join();
+    }
+}
+
+void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ, glm::vec3 viewForward) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if (stopRequested || workerBusy || !pendingJobs.empty()) {
+            return;
+        }
+    }
+
+    const std::optional<uint32_t> nextWindowIndex = findBestUngeneratedChunkWindowIndex(world, focusChunkXZ, viewForward);
+    if (!nextWindowIndex) {
+        return;
+    }
+
+    uint32_t chunkSlotIndex = 0;
+    if (!world.tryBeginChunkGeneration(*nextWindowIndex, chunkSlotIndex)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if (stopRequested) {
+            world.abortChunkGeneration(chunkSlotIndex, {});
+            return;
         }
 
-        const glm::ivec3 chunkCoordinate = world.getChunkByWindowIndex(localWindowIndex).getChunkCoordinate();
-        const int64_t deltaX = static_cast<int64_t>(chunkCoordinate.x) - focusChunkXZ.x;
-        const int64_t deltaZ = static_cast<int64_t>(chunkCoordinate.z) - focusChunkXZ.y;
-        const int64_t distanceSquared = deltaX * deltaX + deltaZ * deltaZ;
-
-        if (!bestIndex.has_value() || distanceSquared < bestDistanceSquared) {
-            bestIndex = static_cast<uint32_t>(localWindowIndex);
-            bestDistanceSquared = distanceSquared;
-        }
+        pendingJobs.push({&world, chunkSlotIndex, world.getVoxelDimensions()});
     }
 
-    return bestIndex;
-}
-}
-
-WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world) const {
-    std::vector<uint32_t> localChunkWindowIndices(world.getChunkCount());
-    for (size_t i = 0; i < localChunkWindowIndices.size(); i++) {
-        localChunkWindowIndices[i] = static_cast<uint32_t>(i);
-    }
-
-    return generateTerrain(world, localChunkWindowIndices);
+    queueCondition.notify_one();
 }
 
-WorldGenerationStats WorldGenerator::generateTerrain(VoxelWorld& world, const std::vector<uint32_t>& localChunkWindowIndices) const {
-    return generateChunkWindowIndices(world, world.getVoxelDimensions(), localChunkWindowIndices);
-}
-
-std::optional<WorldGenerationStats> WorldGenerator::generateNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ) const {
-    const std::optional<uint32_t> nextChunkIndex = findNearestUngeneratedChunkWindowIndex(world, focusChunkXZ);
-    if (!nextChunkIndex.has_value()) {
+std::optional<WorldGenerationStats> WorldGenerator::consumeCompletedGeneration() {
+    std::lock_guard<std::mutex> lock(queueMutex);
+    if (completedStats.empty()) {
         return std::nullopt;
     }
 
-    return generateChunkWindowIndices(world, world.getVoxelDimensions(), std::vector<uint32_t>{*nextChunkIndex});
+    WorldGenerationStats stats = completedStats.front();
+    completedStats.pop();
+    return stats;
 }
+
+void WorldGenerator::workerMain() {
+    while (true) {
+        GenerationJob job{};
+
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueCondition.wait(lock, [this]() {
+                return stopRequested || !pendingJobs.empty();
+            });
+
+            if (stopRequested && pendingJobs.empty()) {
+                return;
+            }
+
+            job = pendingJobs.front();
+            pendingJobs.pop();
+            workerBusy = true;
+        }
+
+        std::optional<WorldGenerationStats> stats;
+        try {
+            stats = generateChunkOnWorker(*job.world, job.chunkSlotIndex, job.voxelDimensions);
+        } catch (const std::exception& e) {
+            std::cerr << "world generation failed: " << e.what() << std::endl;
+        }
+
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if (stats) {
+            completedStats.push(*stats);
+        }
+        workerBusy = false;
+    }
+}
+

@@ -136,7 +136,7 @@ private:
     glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
     float yawDegrees = 90.0f;
     float pitchDegrees = 0.0f;
-    float movementSpeed = 28.0f;
+    float movementSpeed = 200.0f;
     float lookSensitivity = 0.08f;
     bool cursorLocked = true;
     bool escapePressedLastFrame = false;

@@ -67,7 +67,7 @@ float fractalNoise(const glm::vec2& position) {
 }
 
 float sampleTerrainHeight(const glm::vec2& position, const glm::uvec3& voxelDimensions) {
-    const float broadShape = fractalNoise(position * 0.00045f);
+    const float broadShape = 10.0f*fractalNoise(position * 0.00045f);
     const float detailShape = fractalNoise(position * 0.0018f + glm::vec2(37.0f, -19.0f));
     const float halfWorldHeight = (static_cast<float>(voxelDimensions.y) - 1.0f) * 0.5f;
     const float baseHeight = halfWorldHeight - 20.0f;
