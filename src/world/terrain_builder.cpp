@@ -5,10 +5,16 @@
 #include "voxel_world.hpp"
 
 namespace {
+constexpr uint32_t COLUMN_HEIGHT_SAMPLE_STRIDE = 8u;
+
 struct BrickClassification {
     bool isAllAir = true;
     bool isAllSolid = true;
 };
+
+float lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
 
 size_t columnIndex(uint32_t x, uint32_t z) {
     return static_cast<size_t>(x) + static_cast<size_t>(Chunk::SIZE) * z;
@@ -20,18 +26,63 @@ size_t brickMapIndex(uint32_t brickX, uint32_t brickY, uint32_t brickZ) {
            static_cast<size_t>(brickZ) * Chunk::BRICKS_PER_AXIS * Chunk::BRICKS_PER_AXIS;
 }
 
+uint32_t coarseSampleCountPerAxis() {
+    return ((Chunk::SIZE - 1u) / COLUMN_HEIGHT_SAMPLE_STRIDE) + 2u;
+}
+
+uint32_t coarseSampleLocalCoordinate(uint32_t sampleIndex) {
+    const uint32_t coordinate = sampleIndex * COLUMN_HEIGHT_SAMPLE_STRIDE;
+    return coordinate < Chunk::SIZE ? coordinate : (Chunk::SIZE - 1u);
+}
+
+size_t coarseSampleIndex(uint32_t sampleX, uint32_t sampleZ, uint32_t sampleCountPerAxis) {
+    return static_cast<size_t>(sampleX) + static_cast<size_t>(sampleCountPerAxis) * sampleZ;
+}
+
 void sampleChunkColumnHeights(
     std::vector<uint32_t>& columnHeights,
     glm::ivec3 chunkCoordinate,
     const glm::uvec3& voxelDimensions
 ) {
-    for (uint32_t localZ = 0; localZ < Chunk::SIZE; localZ++) {
+    const uint32_t sampleCountPerAxis = coarseSampleCountPerAxis();
+    std::vector<float> coarseHeights(static_cast<size_t>(sampleCountPerAxis) * sampleCountPerAxis);
+
+    for (uint32_t sampleZ = 0; sampleZ < sampleCountPerAxis; sampleZ++) {
+        const uint32_t localZ = coarseSampleLocalCoordinate(sampleZ);
         const int32_t worldZ = chunkCoordinate.z * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localZ);
-        for (uint32_t localX = 0; localX < Chunk::SIZE; localX++) {
+
+        for (uint32_t sampleX = 0; sampleX < sampleCountPerAxis; sampleX++) {
+            const uint32_t localX = coarseSampleLocalCoordinate(sampleX);
             const int32_t worldX = chunkCoordinate.x * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localX);
-            columnHeights[columnIndex(localX, localZ)] = static_cast<uint32_t>(sampleTerrainHeight(
+            coarseHeights[coarseSampleIndex(sampleX, sampleZ, sampleCountPerAxis)] = sampleTerrainHeight(
                 glm::vec2(static_cast<float>(worldX), static_cast<float>(worldZ)), voxelDimensions
-            ));
+            );
+        }
+    }
+
+    for (uint32_t localZ = 0; localZ < Chunk::SIZE; localZ++) {
+        const uint32_t sampleZ0 = localZ / COLUMN_HEIGHT_SAMPLE_STRIDE;
+        const uint32_t sampleZ1 = sampleZ0 + 1u;
+        const uint32_t localZ0 = coarseSampleLocalCoordinate(sampleZ0);
+        const uint32_t localZ1 = coarseSampleLocalCoordinate(sampleZ1);
+        const float zDenominator = static_cast<float>(localZ1 - localZ0);
+        const float zT = zDenominator > 0.0f ? static_cast<float>(localZ - localZ0) / zDenominator : 0.0f;
+
+        for (uint32_t localX = 0; localX < Chunk::SIZE; localX++) {
+            const uint32_t sampleX0 = localX / COLUMN_HEIGHT_SAMPLE_STRIDE;
+            const uint32_t sampleX1 = sampleX0 + 1u;
+            const uint32_t localX0 = coarseSampleLocalCoordinate(sampleX0);
+            const uint32_t localX1 = coarseSampleLocalCoordinate(sampleX1);
+            const float xDenominator = static_cast<float>(localX1 - localX0);
+            const float xT = xDenominator > 0.0f ? static_cast<float>(localX - localX0) / xDenominator : 0.0f;
+
+            const float h00 = coarseHeights[coarseSampleIndex(sampleX0, sampleZ0, sampleCountPerAxis)];
+            const float h10 = coarseHeights[coarseSampleIndex(sampleX1, sampleZ0, sampleCountPerAxis)];
+            const float h01 = coarseHeights[coarseSampleIndex(sampleX0, sampleZ1, sampleCountPerAxis)];
+            const float h11 = coarseHeights[coarseSampleIndex(sampleX1, sampleZ1, sampleCountPerAxis)];
+            const float interpolatedHeight = lerp(lerp(h00, h10, xT), lerp(h01, h11, xT), zT);
+
+            columnHeights[columnIndex(localX, localZ)] = static_cast<uint32_t>(interpolatedHeight + 0.5f);
         }
     }
 }

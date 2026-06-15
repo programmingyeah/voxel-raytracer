@@ -8,6 +8,7 @@
 #include <optional>
 #include <queue>
 #include <thread>
+#include <vector>
 
 struct WorldGenerationStats {
     uint64_t solidVoxelCount = 0;
@@ -32,11 +33,13 @@ private:
 
     void workerMain();
 
-    std::thread workerThread;
+    std::vector<std::thread> workerThreads;
     std::mutex queueMutex;
     std::condition_variable queueCondition;
     std::queue<GenerationJob> pendingJobs;
     std::queue<WorldGenerationStats> completedStats;
+    size_t workerThreadCount = 0;
+    size_t maxInFlightJobs = 0;
+    size_t activeWorkerCount = 0;
     bool stopRequested = false;
-    bool workerBusy = false;
 };

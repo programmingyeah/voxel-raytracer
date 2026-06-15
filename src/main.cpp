@@ -12,7 +12,7 @@
 
 namespace {
 //settings
-constexpr uint32_t RENDER_DISTANCE = 5;
+constexpr uint32_t RENDER_DISTANCE = 10;
 constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
 
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
@@ -100,7 +100,12 @@ void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera)
         const glm::ivec2 focusChunkXZ = chunkXZFromPosition(camera.getPosition());
         world.centerChunkWindow(focusChunkXZ);
         worldGenerator.requestNextChunk(world, focusChunkXZ, camera.getForward());
-        if (const auto generationStats = worldGenerator.consumeCompletedGeneration(); generationStats.has_value()) {
+        while (true) {
+            const std::optional<WorldGenerationStats> generationStats = worldGenerator.consumeCompletedGeneration();
+            if (!generationStats.has_value()) {
+                break;
+            }
+
             renderer.setWorldStats(*generationStats);
         }
 

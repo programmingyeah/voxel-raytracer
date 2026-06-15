@@ -5,9 +5,24 @@
 
 #include <chrono>
 #include <iostream>
+#include <algorithm>
 #include <optional>
+#include <thread>
 
 namespace {
+size_t defaultWorkerThreadCount() {
+    const unsigned int hardwareThreadCount = std::thread::hardware_concurrency();
+    if (hardwareThreadCount <= 1u) {
+        return 1u;
+    }
+
+    return static_cast<size_t>(hardwareThreadCount - 1u);
+}
+
+size_t defaultMaxInFlightJobCount(size_t workerThreadCount) {
+    return workerThreadCount > 0u ? workerThreadCount * 2u : 1u;
+}
+
 WorldGenerationStats generateChunkOnWorker(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions) {
     WorldGenerationStats stats{};
     const auto generationStart = std::chrono::steady_clock::now();
@@ -32,7 +47,15 @@ WorldGenerationStats generateChunkOnWorker(VoxelWorld& world, uint32_t chunkSlot
 }
 }
 
-WorldGenerator::WorldGenerator() : workerThread(&WorldGenerator::workerMain, this) {}
+WorldGenerator::WorldGenerator() {
+    workerThreadCount = defaultWorkerThreadCount();
+    maxInFlightJobs = defaultMaxInFlightJobCount(workerThreadCount);
+
+    workerThreads.reserve(workerThreadCount);
+    for (size_t workerIndex = 0; workerIndex < workerThreadCount; workerIndex++) {
+        workerThreads.emplace_back(&WorldGenerator::workerMain, this);
+    }
+}
 
 WorldGenerator::~WorldGenerator() {
     {
@@ -41,8 +64,10 @@ WorldGenerator::~WorldGenerator() {
     }
     queueCondition.notify_all();
 
-    if (workerThread.joinable()) {
-        workerThread.join();
+    for (std::thread& workerThread : workerThreads) {
+        if (workerThread.joinable()) {
+            workerThread.join();
+        }
     }
 }
 
@@ -51,34 +76,50 @@ void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ
         return;
     }
 
+    size_t jobBudget = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex);
-        if (stopRequested || workerBusy || !pendingJobs.empty()) {
-            return;
-        }
-    }
-
-    const std::optional<uint32_t> nextWindowIndex = findBestUngeneratedChunkWindowIndex(world, focusChunkXZ, viewForward);
-    if (!nextWindowIndex) {
-        return;
-    }
-
-    uint32_t chunkSlotIndex = 0;
-    if (!world.tryBeginChunkGeneration(*nextWindowIndex, chunkSlotIndex)) {
-        return;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        if (stopRequested) {
-            world.abortChunkGeneration(chunkSlotIndex, {});
+        const size_t inFlightJobCount = activeWorkerCount + pendingJobs.size();
+        if (stopRequested || inFlightJobCount >= maxInFlightJobs) {
             return;
         }
 
-        pendingJobs.push({&world, chunkSlotIndex, world.getVoxelDimensions()});
+        jobBudget = maxInFlightJobs - inFlightJobCount;
     }
 
-    queueCondition.notify_one();
+    const std::vector<uint32_t> nextWindowIndices = findBestUngeneratedChunkWindowIndices(
+        world,
+        focusChunkXZ,
+        viewForward,
+        jobBudget
+    );
+    if (nextWindowIndices.empty()) {
+        return;
+    }
+
+    size_t queuedJobCount = 0;
+    for (uint32_t nextWindowIndex : nextWindowIndices) {
+        uint32_t chunkSlotIndex = 0;
+        if (!world.tryBeginChunkGeneration(nextWindowIndex, chunkSlotIndex)) {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            if (stopRequested) {
+                world.abortChunkGeneration(chunkSlotIndex, {});
+                return;
+            }
+
+            pendingJobs.push({&world, chunkSlotIndex, world.getVoxelDimensions()});
+        }
+
+        queuedJobCount++;
+    }
+
+    if (queuedJobCount > 0u) {
+        queueCondition.notify_all();
+    }
 }
 
 std::optional<WorldGenerationStats> WorldGenerator::consumeCompletedGeneration() {
@@ -108,7 +149,7 @@ void WorldGenerator::workerMain() {
 
             job = pendingJobs.front();
             pendingJobs.pop();
-            workerBusy = true;
+            activeWorkerCount++;
         }
 
         std::optional<WorldGenerationStats> stats;
@@ -122,7 +163,7 @@ void WorldGenerator::workerMain() {
         if (stats) {
             completedStats.push(*stats);
         }
-        workerBusy = false;
+        activeWorkerCount--;
     }
 }
 

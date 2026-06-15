@@ -1,10 +1,10 @@
 #include "terrain_noise.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 
 #include <glm/common.hpp>
-#include <glm/gtc/constants.hpp>
 
 namespace {
 float fade(float t) {
@@ -22,9 +22,20 @@ uint32_t hash2D(uint32_t x, uint32_t z) {
 }
 
 glm::vec2 gradient(int x, int z) {
+    constexpr float INV_SQRT2 = 0.70710678118f;
+    static constexpr std::array<glm::vec2, 8> gradients = {
+        glm::vec2(1.0f, 0.0f),
+        glm::vec2(-1.0f, 0.0f),
+        glm::vec2(0.0f, 1.0f),
+        glm::vec2(0.0f, -1.0f),
+        glm::vec2(INV_SQRT2, INV_SQRT2),
+        glm::vec2(-INV_SQRT2, INV_SQRT2),
+        glm::vec2(INV_SQRT2, -INV_SQRT2),
+        glm::vec2(-INV_SQRT2, -INV_SQRT2)
+    };
+
     const uint32_t hash = hash2D(static_cast<uint32_t>(x), static_cast<uint32_t>(z));
-    const float angle = static_cast<float>(hash & 1023u) * (glm::two_pi<float>() / 1024.0f);
-    return glm::vec2(std::cos(angle), std::sin(angle));
+    return gradients[hash & 7u];
 }
 
 float perlinNoise(const glm::vec2& position) {

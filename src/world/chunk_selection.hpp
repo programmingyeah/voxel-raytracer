@@ -1,7 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <optional>
+#include <vector>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
@@ -10,8 +11,9 @@
 
 class VoxelWorld;
 
-std::optional<uint32_t> findBestUngeneratedChunkWindowIndex(
+std::vector<uint32_t> findBestUngeneratedChunkWindowIndices(
     const VoxelWorld& world,
     glm::ivec2 focusChunkXZ,
-    glm::vec3 viewForward
+    glm::vec3 viewForward,
+    size_t maxCount
 );

@@ -24,6 +24,11 @@ struct ChunkSelectionScore {
     float alignment = -1.0f;
 };
 
+struct ScoredChunkSelection {
+    uint32_t windowIndex = 0;
+    ChunkSelectionScore score{};
+};
+
 glm::vec2 normalizedViewDirectionXZ(glm::vec3 viewForward) {
     const glm::vec2 forwardXZ(viewForward.x, viewForward.z);
     const float lengthSquared = forwardXZ.x * forwardXZ.x + forwardXZ.y * forwardXZ.y;
@@ -97,13 +102,19 @@ bool isChunkSelectionScoreBetter(const ChunkSelectionScore& candidate, const Chu
 }
 }
 
-std::optional<uint32_t> findBestUngeneratedChunkWindowIndex(
+std::vector<uint32_t> findBestUngeneratedChunkWindowIndices(
     const VoxelWorld& world,
     glm::ivec2 focusChunkXZ,
-    glm::vec3 viewForward
+    glm::vec3 viewForward,
+    size_t maxCount
 ) {
-    std::optional<uint32_t> bestIndex;
-    ChunkSelectionScore bestScore{};
+    if (maxCount == 0u) {
+        return {};
+    }
+
+    std::vector<ScoredChunkSelection> bestSelections;
+    bestSelections.reserve(maxCount);
+
     const glm::vec2 normalizedViewXZ = normalizedViewDirectionXZ(viewForward);
     const glm::uvec3 voxelDimensions = world.getVoxelDimensions();
 
@@ -120,11 +131,33 @@ std::optional<uint32_t> findBestUngeneratedChunkWindowIndex(
             voxelDimensions
         );
 
-        if (!bestIndex || isChunkSelectionScoreBetter(candidateScore, bestScore)) {
-            bestIndex = static_cast<uint32_t>(localWindowIndex);
-            bestScore = candidateScore;
+        if (bestSelections.size() == maxCount &&
+            !isChunkSelectionScoreBetter(candidateScore, bestSelections.back().score)) {
+            continue;
+        }
+
+        const ScoredChunkSelection candidateSelection{
+            static_cast<uint32_t>(localWindowIndex),
+            candidateScore
+        };
+
+        auto insertPosition = bestSelections.begin();
+        while (insertPosition != bestSelections.end() &&
+               !isChunkSelectionScoreBetter(candidateScore, insertPosition->score)) {
+            ++insertPosition;
+        }
+
+        bestSelections.insert(insertPosition, candidateSelection);
+        if (bestSelections.size() > maxCount) {
+            bestSelections.pop_back();
         }
     }
 
-    return bestIndex;
+    std::vector<uint32_t> bestIndices;
+    bestIndices.reserve(bestSelections.size());
+    for (const ScoredChunkSelection& selection : bestSelections) {
+        bestIndices.push_back(selection.windowIndex);
+    }
+
+    return bestIndices;
 }

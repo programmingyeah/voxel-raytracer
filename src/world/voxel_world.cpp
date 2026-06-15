@@ -146,6 +146,9 @@ std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
         recycledChunkSlots.push_back(recycledChunkSlot);
     }
 
+    std::vector<uint32_t> recycledSlotsNeedingBrickMapUpload;
+    recycledSlotsNeedingBrickMapUpload.reserve(recycledChunkSlots.size());
+
     for (size_t localWindowIndex = 0; localWindowIndex < windowChunkCount; localWindowIndex++) {
         if (nextWindow[localWindowIndex] != INVALID_CHUNK_SLOT) {
             continue;
@@ -164,14 +167,18 @@ std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
             generatedChunkCount.fetch_sub(1u, std::memory_order_relaxed);
         }
 
+        releaseChunkSlotBricksNoDirty(recycledChunkSlot);
+
         Chunk& chunk = slots[recycledChunkSlot].chunk;
         chunk.setChunkCoordinate(newChunkOrigin + glm::ivec3(chunkCoordFromWindowIndex(localWindowIndex)));
-        chunk.clear();
+        chunk.resetBrickMapToAirNoCallbacks();
         slots[recycledChunkSlot].solidVoxels = 0u;
         {
             std::lock_guard<std::mutex> stateLock(chunkStateMutex);
             slots[recycledChunkSlot].state = ChunkRuntimeState::Ungenerated;
         }
+
+        recycledSlotsNeedingBrickMapUpload.push_back(recycledChunkSlot);
         enteringWindowIndices.push_back(static_cast<uint32_t>(localWindowIndex));
     }
 
@@ -181,6 +188,10 @@ std::vector<uint32_t> VoxelWorld::shiftChunkWindow(glm::ivec3 deltaChunks) {
             if (window[localWindowIndex] != nextWindow[localWindowIndex]) {
                 dirty.window[localWindowIndex] = 1u;
             }
+        }
+
+        for (uint32_t recycledChunkSlot : recycledSlotsNeedingBrickMapUpload) {
+            dirty.brickMaps[recycledChunkSlot] = 1u;
         }
     }
 
@@ -233,18 +244,26 @@ uint32_t VoxelWorld::allocateBrick() {
     return brickIndex;
 }
 
+void VoxelWorld::releaseChunkSlotBricksNoDirty(size_t chunkSlotIndex) {
+    const Chunk::EncodedBrickMap& brickMap = slots.at(chunkSlotIndex).chunk.getBrickMap();
+
+    std::lock_guard<std::mutex> brickPoolLock(brickPoolMutex);
+    for (const BrickMapEntry& entry : brickMap) {
+        if (entry.index == BRICK_MAP_EMPTY || entry.index >= brickPool.bricks.size()) {
+            continue;
+        }
+
+        brickPool.free.push_back(entry.index);
+    }
+}
+
 void VoxelWorld::releaseBrick(uint32_t brickIndex) {
     if (brickIndex >= brickPool.bricks.size()) {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> brickPoolLock(brickPoolMutex);
-        brickPool.bricks[brickIndex] = Brick{};
-        brickPool.free.push_back(brickIndex);
-    }
-
-    onBrickPoolDirty(brickIndex);
+    std::lock_guard<std::mutex> brickPoolLock(brickPoolMutex);
+    brickPool.free.push_back(brickIndex);
 }
 
 void VoxelWorld::onChunkBrickMapDirty(size_t dirtyChunkIndex, uint32_t mapIndex) {
@@ -325,7 +344,6 @@ void VoxelWorld::abortChunkGeneration(uint32_t chunkSlotIndex, const std::vector
                 continue;
             }
 
-            brickPool.bricks[brickIndex] = Brick{};
             brickPool.free.push_back(brickIndex);
         }
     }

@@ -84,6 +84,7 @@ private:
     size_t chunkSlotIndexFromVoxel(uint32_t x, uint32_t y, uint32_t z, glm::uvec3& outLocalVoxel) const;
     ChunkRuntimeState chunkStateBySlotIndex(size_t chunkSlotIndex) const;
     bool isChunkSlotGenerated(size_t chunkSlotIndex) const;
+    void releaseChunkSlotBricksNoDirty(size_t chunkSlotIndex);
 
     uint32_t allocateBrick();
     void releaseBrick(uint32_t brickIndex);
