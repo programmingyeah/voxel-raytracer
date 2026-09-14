@@ -29,10 +29,9 @@ struct GpuVoxelBuffers {
 struct GpuWorldDiff {
     GpuBufferDiff chunkWindowIndices;
     GpuBufferDiff chunkBrickMaps;
-    GpuBufferDiff brickData;
 
     bool empty() const {
-        return chunkWindowIndices.empty() && chunkBrickMaps.empty() && brickData.empty();
+        return chunkWindowIndices.empty() && chunkBrickMaps.empty();
     }
 };
 

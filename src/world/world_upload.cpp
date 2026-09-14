@@ -1,24 +1,12 @@
 #include "world_upload.hpp"
 
+#include "gpu_world_layout.hpp"
 #include "voxel_world.hpp"
 
 #include <algorithm>
 #include <utility>
 
 namespace {
-constexpr uint32_t CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
-constexpr uint32_t CHUNK_ACCEL_8_WORD_COUNT = (8u * 8u * 8u + 31u) / 32u;
-constexpr uint32_t CHUNK_ACCEL_4_WORD_COUNT = (4u * 4u * 4u + 31u) / 32u;
-constexpr uint32_t CHUNK_ACCEL_2_WORD_COUNT = (2u * 2u * 2u + 31u) / 32u;
-constexpr uint32_t CHUNK_ACCEL_FLAG_WORD_COUNT = 1u;
-constexpr uint32_t CHUNK_ACCEL_WORD_COUNT =
-    CHUNK_ACCEL_FLAG_WORD_COUNT + CHUNK_ACCEL_8_WORD_COUNT + CHUNK_ACCEL_4_WORD_COUNT + CHUNK_ACCEL_2_WORD_COUNT;
-constexpr uint32_t PACKED_CHUNK_WORD_COUNT = CHUNK_ACCEL_WORD_COUNT + Chunk::BRICK_COUNT * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-constexpr uint32_t CHUNK_ACCEL_8_OFFSET = CHUNK_ACCEL_FLAG_WORD_COUNT;
-constexpr uint32_t CHUNK_ACCEL_4_OFFSET = CHUNK_ACCEL_8_OFFSET + CHUNK_ACCEL_8_WORD_COUNT;
-constexpr uint32_t CHUNK_ACCEL_2_OFFSET = CHUNK_ACCEL_4_OFFSET + CHUNK_ACCEL_4_WORD_COUNT;
-constexpr uint32_t CHUNK_BRICK_MAP_OFFSET = CHUNK_ACCEL_WORD_COUNT;
-
 BrickMapEntry emptyBrickMapEntry() {
     return BrickMapEntry{BRICK_MAP_EMPTY, AIR_MATERIAL};
 }
@@ -41,24 +29,6 @@ uint32_t accelIndex4(uint32_t x, uint32_t y, uint32_t z) {
 
 uint32_t accelIndex2(uint32_t x, uint32_t y, uint32_t z) {
     return x + 2u * (y + 2u * z);
-}
-
-// Interleaves 4 bits per axis into a 12-bit Morton index:
-// x -> 0/3/6/9, y -> 1/4/7/10, z -> 2/5/8/11.
-uint32_t mortonBrickIndex(uint32_t x, uint32_t y, uint32_t z) {
-    return
-        ((x & 0x1u) << 0u) |
-        ((y & 0x1u) << 1u) |
-        ((z & 0x1u) << 2u) |
-        ((x & 0x2u) << 2u) |
-        ((y & 0x2u) << 3u) |
-        ((z & 0x2u) << 4u) |
-        ((x & 0x4u) << 4u) |
-        ((y & 0x4u) << 5u) |
-        ((z & 0x4u) << 6u) |
-        ((x & 0x8u) << 6u) |
-        ((y & 0x8u) << 7u) |
-        ((z & 0x8u) << 8u);
 }
 
 bool brickEntryHasRenderableContent(const BrickMapEntry& entry) {
@@ -191,7 +161,6 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
     GpuWorldDiff worldDiff{};
     worldDiff.chunkWindowIndices.totalWordCount = world.window.size();
     worldDiff.chunkBrickMaps.totalWordCount = world.slots.size() * PACKED_CHUNK_WORD_COUNT;
-    worldDiff.brickData.totalWordCount = world.brickPool.bricks.size() * PACKED_BRICK_WORD_COUNT;
 
     for (const auto& span : buildDirtySpans(world.dirty.window)) {
         const size_t spanStartIndex = span.first;
@@ -223,25 +192,6 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
                 srcWordOffset / PACKED_CHUNK_WORD_COUNT + chunkOffset,
                 world.slots[chunkSlotIndex].chunk.getBrickMap(),
                 world.isChunkSlotGenerated(chunkSlotIndex)
-            );
-        }
-    }
-
-    for (const auto& span : buildDirtySpans(world.dirty.brickPool)) {
-        const size_t spanStartBrick = span.first;
-        const size_t spanBrickCount = span.second;
-        const size_t dstWordOffset = spanStartBrick * PACKED_BRICK_WORD_COUNT;
-        const size_t wordCount = spanBrickCount * PACKED_BRICK_WORD_COUNT;
-        const size_t srcWordOffset = worldDiff.brickData.data.size();
-
-        worldDiff.brickData.data.resize(srcWordOffset + wordCount, 0u);
-        worldDiff.brickData.regions.push_back({srcWordOffset, dstWordOffset, wordCount});
-
-        for (size_t brickOffset = 0; brickOffset < spanBrickCount; brickOffset++) {
-            packBrick(
-                worldDiff.brickData.data,
-                (srcWordOffset / PACKED_BRICK_WORD_COUNT) + brickOffset,
-                world.brickPool.bricks[spanStartBrick + brickOffset]
             );
         }
     }

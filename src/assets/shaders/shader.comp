@@ -62,6 +62,8 @@ const uint CHUNK_ACCEL_2_OFFSET = CHUNK_ACCEL_4_OFFSET + CHUNK_ACCEL_4_WORD_COUN
 const uint CHUNK_BRICK_MAP_OFFSET = CHUNK_ACCEL_WORD_COUNT;
 const uint CHUNK_RECORD_WORD_COUNT = CHUNK_ACCEL_WORD_COUNT + uint(BRICK_COUNT) * BRICK_MAP_ENTRY_WORD_COUNT;
 
+// Keep this mirrored with src/world/gpu_world_layout.hpp.
+
 struct RayQueryCounters {
     int chunkSteps;
     int brickSteps;

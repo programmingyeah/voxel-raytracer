@@ -7,6 +7,8 @@
 #include "image.hpp"
 #include "buffer.hpp"
 #include "sync_manager.hpp"
+#include "brick_residency.hpp"
+#include "renderer_shared.hpp"
 #include "../world/voxel_world.hpp"
 #include "../world/world_gen.hpp"
 #include "../camera.hpp"
@@ -29,6 +31,8 @@ public:
 
     Instance instance;
 private:
+    friend class BrickResidencyManager;
+
     VoxelWorld* world = nullptr;
     WorldGenerationStats worldStats{};
     GLFWwindow* window = nullptr;
@@ -42,30 +46,8 @@ private:
     Buffer chunkWindowIndexBuffer{};
     Buffer chunkBrickMapBuffer{};
     Buffer brickPoolBuffer{};
-    struct RequestBuffer {
-        Buffer buffer{};
-        uint32_t* mappedWords = nullptr;
-    };
-    std::vector<RequestBuffer> brickRequestBuffers;
-    std::vector<uint32_t> gpuSlotByChunkEntry;
-    std::vector<uint64_t> requestedChunkEntryBits;
-    std::vector<uint32_t> cpuBrickToGpuBrick;
-    std::vector<uint32_t> gpuBrickToCpuBrick;
-    std::vector<uint32_t> gpuBrickPoolFree;
-    uint32_t gpuBrickCapacity = 0;
-    uint32_t nextGpuBrickSlot = 0;
-    static constexpr uint32_t INVALID_GPU_BRICK_SLOT = std::numeric_limits<uint32_t>::max();
-    static constexpr uint32_t INITIAL_GPU_BRICK_CAPACITY = 65536u;
-    static constexpr uint32_t BRICK_REQUEST_CAPACITY = 65536u;
-    struct BufferUpload {
-        Buffer stagingBuffer{};
-        VkBuffer destinationBuffer = VK_NULL_HANDLE;
-        std::vector<BufferCopyRegion> regions;
-    };
-    struct FrameUploads {
-        std::vector<BufferUpload> pending;
-    };
-    std::vector<FrameUploads> frameUploads;
+    BrickResidencyManager brickResidency;
+    std::vector<VulkanAppFrameUploads> frameUploads;
     SyncManager syncManager;
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
     VkRenderPass imguiRenderPass = VK_NULL_HANDLE;
@@ -81,8 +63,6 @@ private:
     float frameTimeMs = 0.0f;
     int rayQueryVisualizationMode = 0;
     float rayQueryVisualizationIntensity = 1.0f;
-    uint32_t lastBrickRequestCount = 0;
-    uint32_t lastDroppedBrickRequestCount = 0;
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 
@@ -93,7 +73,7 @@ private:
     void syncWorld();
     void processBrickRequests(size_t frameIndex);
     void ensureGpuBrickCapacity(uint32_t requiredCapacity);
-    void queueBufferUpload(FrameUploads& uploads, Buffer& destinationBuffer, const std::vector<uint32_t>& data, const std::vector<BufferCopyRegion>& regions);
+    void queueBufferUpload(VulkanAppFrameUploads& uploads, Buffer& destinationBuffer, const std::vector<uint32_t>& data, const std::vector<BufferCopyRegion>& regions);
     void resetRequestBuffer(size_t frameIndex);
     void recordUploads(VkCommandBuffer commandBuffer);
     void cleanupUploads(size_t frameIndex);
