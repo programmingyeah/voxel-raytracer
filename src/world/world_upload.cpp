@@ -43,6 +43,8 @@ uint32_t accelIndex2(uint32_t x, uint32_t y, uint32_t z) {
     return x + 2u * (y + 2u * z);
 }
 
+// Interleaves 4 bits per axis into a 12-bit Morton index:
+// x -> 0/3/6/9, y -> 1/4/7/10, z -> 2/5/8/11.
 uint32_t mortonBrickIndex(uint32_t x, uint32_t y, uint32_t z) {
     return
         ((x & 0x1u) << 0u) |
@@ -84,7 +86,7 @@ void packBrick(std::vector<uint32_t>& brickData, size_t brickIndex, const Brick&
 
 void packBrickMapEntry(std::vector<uint32_t>& chunkBrickMaps, size_t packedEntryIndex, const BrickMapEntry& entry) {
     chunkBrickMaps[packedEntryIndex] = entry.index;
-    chunkBrickMaps[packedEntryIndex + 1u] = entry.materialId;
+    chunkBrickMaps[packedEntryIndex + 1u] = static_cast<uint32_t>(entry.materialId) & GPU_BRICK_METADATA_MATERIAL_MASK;
 }
 
 void packChunkRecord(

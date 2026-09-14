@@ -26,6 +26,9 @@ void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uv
 
 inline constexpr uint32_t BRICK_MAP_EMPTY = std::numeric_limits<uint32_t>::max();
 inline constexpr uint32_t PACKED_BRICK_MAP_ENTRY_WORD_COUNT = 2u;
+inline constexpr uint32_t GPU_BRICK_METADATA_MATERIAL_MASK = 0xffu;
+inline constexpr uint32_t GPU_BRICK_METADATA_RESIDENT_BIT = 1u << 8u;
+inline constexpr uint32_t GPU_BRICK_METADATA_REQUESTED_BIT = 1u << 9u;
 
 struct BrickMapEntry {
     uint32_t index = BRICK_MAP_EMPTY;
@@ -64,7 +67,7 @@ private:
     void setChunkCoordinate(glm::ivec3 inChunkCoordinate) { chunkCoordinate = inChunkCoordinate; }
     EncodedBrickMap& accessBrickMapForGeneration() { return brickMap; }
     void resetBrickMapToAirNoCallbacks();
-    void setStorageCallbacks(
+    void bindStorage(
         std::vector<Brick>* inBrickPool,
         AllocateBrickCallback inAllocateBrickCallback,
         ReleaseBrickCallback inReleaseBrickCallback,
@@ -76,20 +79,20 @@ private:
     uint32_t allocateBrick();
     void releaseBrick(uint32_t brickIndex);
     void markBrickMapDirty(uint32_t mapIndex);
-    void markWholeChunkDirty();
+    void markChunkDirty();
     void markBrickPoolDirty(uint32_t brickIndex);
 
-    //position of the chunk
+    // World-space chunk coordinate.
     glm::ivec3 chunkCoordinate{};
-    //slot index of the chunk (in VoxelWorld)
+    // Slot index within the world window.
     size_t chunkSlotIndex = 0;
-    //chunks brickmap!!
+    // CPU brick map for this chunk.
     EncodedBrickMap brickMap{};
 
-    //brick pool is owned by VoxelWorld
+    // Brick storage is owned by VoxelWorld.
     std::vector<Brick>* externalBrickPool = nullptr;
 
-    //allocations happen through VoxelWorld
+    // Allocation and dirty tracking are forwarded to VoxelWorld.
     AllocateBrickCallback allocateBrickCallback;
     ReleaseBrickCallback releaseBrickCallback;
     ChunkBrickMapDirtyCallback chunkBrickMapDirtyCallback;

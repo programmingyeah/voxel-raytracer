@@ -2,6 +2,7 @@
 #include "../world/world_upload.hpp"
 #include <cassert>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -11,6 +12,14 @@
 #include "utils.hpp"
 
 namespace {
+constexpr uint32_t BRICK_REQUEST_HEADER_WORD_COUNT = 3u;
+constexpr uint32_t CHUNK_ACCEL_8_WORD_COUNT = (8u * 8u * 8u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_4_WORD_COUNT = (4u * 4u * 4u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_2_WORD_COUNT = (2u * 2u * 2u + 31u) / 32u;
+constexpr uint32_t CHUNK_ACCEL_FLAG_WORD_COUNT = 1u;
+constexpr uint32_t CHUNK_ACCEL_WORD_COUNT =
+    CHUNK_ACCEL_FLAG_WORD_COUNT + CHUNK_ACCEL_8_WORD_COUNT + CHUNK_ACCEL_4_WORD_COUNT + CHUNK_ACCEL_2_WORD_COUNT;
+
 struct ComputePushConstants {
     glm::vec4 cameraPos;
     glm::vec4 cameraForward;
@@ -74,6 +83,115 @@ void uploadBufferWithStaging(Instance& instance, CommandPool& commandPool, Buffe
         commandPool
     );
     stagingBuffer.cleanup(&instance);
+}
+
+constexpr uint32_t INVALID_GPU_BRICK_SLOT_VALUE = std::numeric_limits<uint32_t>::max();
+
+size_t chunkEntryCount(size_t chunkCount)
+{
+    return chunkCount * Chunk::BRICK_COUNT;
+}
+
+size_t chunkEntryIndex(size_t chunkSlotIndex, uint32_t packedBrickIndex)
+{
+    return chunkSlotIndex * Chunk::BRICK_COUNT + packedBrickIndex;
+}
+
+bool requestedBit(const std::vector<uint64_t>& bits, size_t entryIndex)
+{
+    const size_t wordIndex = entryIndex / 64u;
+    const uint64_t mask = 1ull << (entryIndex % 64u);
+    return wordIndex < bits.size() && (bits[wordIndex] & mask) != 0u;
+}
+
+void setRequestedBit(std::vector<uint64_t>& bits, size_t entryIndex, bool value)
+{
+    const size_t wordIndex = entryIndex / 64u;
+    const uint64_t mask = 1ull << (entryIndex % 64u);
+    if (value) {
+        bits[wordIndex] |= mask;
+    } else {
+        bits[wordIndex] &= ~mask;
+    }
+}
+
+uint32_t packedChunkWordCount()
+{
+    return CHUNK_ACCEL_WORD_COUNT + static_cast<uint32_t>(Chunk::BRICK_COUNT) * PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+}
+
+void applyChunkMapDiff(
+    std::vector<uint32_t>& gpuSlotByChunkEntry,
+    std::vector<uint64_t>& requestedChunkEntryBits,
+    std::vector<uint32_t>& cpuBrickToGpuBrick,
+    const std::vector<uint32_t>& gpuBrickToCpuBrick,
+    const std::vector<uint32_t>& data,
+    const std::vector<GpuBufferCopyRegion>& regions
+) {
+    for (const GpuBufferCopyRegion& region : regions) {
+        const size_t srcStart = region.srcWordOffset;
+        const size_t dstStart = region.dstWordOffset;
+
+        for (size_t wordOffset = 0; wordOffset + 1u < region.wordCount; wordOffset += PACKED_BRICK_MAP_ENTRY_WORD_COUNT) {
+            const size_t dstWordIndex = dstStart + wordOffset;
+            const size_t chunkLocalWordIndex = dstWordIndex % packedChunkWordCount();
+            if (chunkLocalWordIndex < CHUNK_ACCEL_WORD_COUNT) {
+                continue;
+            }
+
+            const size_t chunkSlotIndex = dstWordIndex / packedChunkWordCount();
+            const uint32_t packedBrickIndex = static_cast<uint32_t>((chunkLocalWordIndex - CHUNK_ACCEL_WORD_COUNT) / PACKED_BRICK_MAP_ENTRY_WORD_COUNT);
+            const size_t entryIndex = chunkEntryIndex(chunkSlotIndex, packedBrickIndex);
+
+            const uint32_t oldGpuSlot = gpuSlotByChunkEntry[entryIndex];
+            if (oldGpuSlot < gpuBrickToCpuBrick.size()) {
+                const uint32_t cpuBrickIndex = gpuBrickToCpuBrick[oldGpuSlot];
+                if (cpuBrickIndex < cpuBrickToGpuBrick.size() && cpuBrickToGpuBrick[cpuBrickIndex] == oldGpuSlot) {
+                    cpuBrickToGpuBrick[cpuBrickIndex] = INVALID_GPU_BRICK_SLOT_VALUE;
+                }
+            }
+
+            gpuSlotByChunkEntry[entryIndex] = INVALID_GPU_BRICK_SLOT_VALUE;
+            setRequestedBit(requestedChunkEntryBits, entryIndex, false);
+
+            const uint32_t newMetadata = data[srcStart + wordOffset + 1u];
+            if ((newMetadata & GPU_BRICK_METADATA_REQUESTED_BIT) != 0u) {
+                setRequestedBit(requestedChunkEntryBits, entryIndex, true);
+            }
+        }
+    }
+}
+
+uint32_t growCapacity(uint32_t currentCapacity, uint32_t requiredCapacity)
+{
+    uint32_t newCapacity = currentCapacity == 0u ? 1u : currentCapacity;
+    while (newCapacity < requiredCapacity) {
+        if (newCapacity > std::numeric_limits<uint32_t>::max() / 2u) {
+            return requiredCapacity;
+        }
+        newCapacity *= 2u;
+    }
+
+    return newCapacity;
+}
+
+//inverts the 4-bit-per-axis morton layout used for chunk brick map entries:
+//x bits live at 0/3/6/9, y at 1/4/7/10, z at 2/5/8/11.
+glm::uvec3 decodeBrickMorton(uint32_t mortonIndex)
+{
+    auto decodeAxis = [mortonIndex](uint32_t axisBitOffset) {
+        return ((mortonIndex >> axisBitOffset) & 0x1u) |
+               (((mortonIndex >> (axisBitOffset + 2u)) & 0x2u)) |
+               (((mortonIndex >> (axisBitOffset + 4u)) & 0x4u)) |
+               (((mortonIndex >> (axisBitOffset + 6u)) & 0x8u));
+    };
+
+    return glm::uvec3(
+        decodeAxis(0u),
+        decodeAxis(1u),
+        decodeAxis(2u)
+    );
+}
 }
 
 void recordBufferCopies(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, const std::vector<BufferCopyRegion>& regions)
@@ -152,7 +270,6 @@ void checkVkResult(VkResult result)
         throw std::runtime_error("ImGui Vulkan backend call failed");
     }
 }
-}
 
 void VulkanApp::framebufferResizeCallback(GLFWwindow* window, int width, int height) {
     (void)width;
@@ -214,12 +331,19 @@ void VulkanApp::initVulkan() {
     brickPoolBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     brickPoolBinding.pImmutableSamplers = nullptr;
 
-    descriptorManager.initLayout(&instance, {storageImageBinding, chunkWindowIndexBinding, chunkBrickMapBinding, brickPoolBinding});
+    VkDescriptorSetLayoutBinding brickRequestBinding{};
+    brickRequestBinding.binding = 4;
+    brickRequestBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    brickRequestBinding.descriptorCount = 1;
+    brickRequestBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    brickRequestBinding.pImmutableSamplers = nullptr;
+
+    descriptorManager.initLayout(&instance, {storageImageBinding, chunkWindowIndexBinding, chunkBrickMapBinding, brickPoolBinding, brickRequestBinding});
     descriptorManager.initPool(
         &instance,
         {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_FRAMES_IN_FLIGHT},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * MAX_FRAMES_IN_FLIGHT}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * MAX_FRAMES_IN_FLIGHT}
         },
         MAX_FRAMES_IN_FLIGHT
     );
@@ -233,7 +357,7 @@ void VulkanApp::initVulkan() {
     createImGuiFramebuffers();
     initImGui();
     commandPool.allocateCommandBuffers(&instance, MAX_FRAMES_IN_FLIGHT);
-    deferredUploadResources.resize(MAX_FRAMES_IN_FLIGHT);
+    frameUploads.resize(MAX_FRAMES_IN_FLIGHT);
     syncManager.init(&instance, swapchain.getSwapImgCount(), MAX_FRAMES_IN_FLIGHT);
 }
 
@@ -446,9 +570,18 @@ void VulkanApp::createWorldBuffers() {
     const GpuVoxelBuffers gpuBuffers = buildGpuVoxelBuffers(*world);
     const VkDeviceSize chunkWindowIndexBufferSize = storageBufferSize(gpuBuffers.chunkWindowIndices);
     const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
-    const VkDeviceSize brickPoolBufferSize = storageBufferSize(
-        world->getBrickCapacity() * PACKED_BRICK_WORD_COUNT
-    );
+    gpuBrickCapacity = std::min<uint32_t>(static_cast<uint32_t>(world->getBrickCapacity()), INITIAL_GPU_BRICK_CAPACITY);
+    if (gpuBrickCapacity == 0u) {
+        gpuBrickCapacity = 1u;
+    }
+    nextGpuBrickSlot = 0u;
+    gpuSlotByChunkEntry.assign(chunkEntryCount(world->getChunkCount()), INVALID_GPU_BRICK_SLOT);
+    requestedChunkEntryBits.assign((gpuSlotByChunkEntry.size() + 63u) / 64u, 0u);
+    cpuBrickToGpuBrick.assign(world->getBrickCapacity(), INVALID_GPU_BRICK_SLOT);
+    gpuBrickToCpuBrick.assign(gpuBrickCapacity, BRICK_MAP_EMPTY);
+
+    const VkDeviceSize brickPoolBufferSize = storageBufferSize(static_cast<size_t>(gpuBrickCapacity) * PACKED_BRICK_WORD_COUNT);
+    const VkDeviceSize brickRequestBufferSize = storageBufferSize(static_cast<size_t>(BRICK_REQUEST_HEADER_WORD_COUNT + BRICK_REQUEST_CAPACITY));
 
     if (chunkWindowIndexBuffer.buffer != VK_NULL_HANDLE) {
         chunkWindowIndexBuffer.cleanup(&instance);
@@ -459,6 +592,14 @@ void VulkanApp::createWorldBuffers() {
     if (brickPoolBuffer.buffer != VK_NULL_HANDLE) {
         brickPoolBuffer.cleanup(&instance);
     }
+    for (RequestBuffer& requestBuffer : brickRequestBuffers) {
+        if (requestBuffer.buffer.mapped != nullptr) {
+            requestBuffer.buffer.unmap(&instance);
+        }
+        requestBuffer.buffer.cleanup(&instance);
+        requestBuffer.mappedWords = nullptr;
+    }
+    brickRequestBuffers.clear();
 
     chunkWindowIndexBuffer.createBuffer(
         &instance,
@@ -478,14 +619,26 @@ void VulkanApp::createWorldBuffers() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     );
+    brickRequestBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (RequestBuffer& requestBuffer : brickRequestBuffers) {
+        requestBuffer.buffer.createBuffer(
+            &instance,
+            brickRequestBufferSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+        requestBuffer.buffer.map(&instance);
+        requestBuffer.mappedWords = static_cast<uint32_t*>(requestBuffer.buffer.mapped);
+        std::fill(requestBuffer.mappedWords, requestBuffer.mappedWords + BRICK_REQUEST_HEADER_WORD_COUNT + BRICK_REQUEST_CAPACITY, 0u);
+        requestBuffer.mappedWords[2] = BRICK_REQUEST_CAPACITY;
+    }
 
     uploadBufferWithStaging(instance, commandPool, chunkWindowIndexBuffer, gpuBuffers.chunkWindowIndices);
     uploadBufferWithStaging(instance, commandPool, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
-    uploadBufferWithStaging(instance, commandPool, brickPoolBuffer, gpuBuffers.brickData);
     clearGpuUploadDirtyState(*world);
 }
 
-void VulkanApp::syncWorldBuffers() {
+void VulkanApp::syncWorld() {
     if (world == nullptr) {
         return;
     }
@@ -493,14 +646,14 @@ void VulkanApp::syncWorldBuffers() {
     const GpuWorldDiff worldDiff = buildGpuWorldDiff(*world);
     const VkDeviceSize requiredChunkWindowIndexBufferSize = storageBufferSize(worldDiff.chunkWindowIndices.totalWordCount);
     const VkDeviceSize requiredChunkBrickMapBufferSize = storageBufferSize(worldDiff.chunkBrickMaps.totalWordCount);
-    const VkDeviceSize requiredBrickPoolBufferSize = storageBufferSize(worldDiff.brickData.totalWordCount);
+    const VkDeviceSize requiredBrickPoolBufferSize = brickPoolBuffer.size;
 
     if (requiredChunkWindowIndexBufferSize > chunkWindowIndexBuffer.size ||
         requiredChunkBrickMapBufferSize > chunkBrickMapBuffer.size ||
         requiredBrickPoolBufferSize > brickPoolBuffer.size) {
         vkDeviceWaitIdle(instance.device());
-        for (size_t i = 0; i < deferredUploadResources.size(); i++) {
-            cleanupDeferredUploadResources(i);
+        for (size_t i = 0; i < frameUploads.size(); i++) {
+            cleanupUploads(i);
         }
         createWorldBuffers();
         createDescriptorSets(false);
@@ -511,41 +664,23 @@ void VulkanApp::syncWorldBuffers() {
         return;
     }
 
-    DeferredUploadResources& frameUploads = deferredUploadResources.at(currentFrame);
+    applyChunkMapDiff(gpuSlotByChunkEntry, requestedChunkEntryBits, cpuBrickToGpuBrick, gpuBrickToCpuBrick, worldDiff.chunkBrickMaps.data, worldDiff.chunkBrickMaps.regions);
 
-    const auto queueBufferUpload = [this, &frameUploads](Buffer& destinationBuffer, const GpuBufferDiff& diff) {
-        if (diff.empty()) {
-            return;
-        }
-
-        PendingBufferUpload upload{};
-        upload.destinationBuffer = destinationBuffer.buffer;
-        upload.regions = byteRegionsFromWordRegions(diff.regions);
-        upload.stagingBuffer.createBuffer(
-            &instance,
-            storageBufferSize(diff.data),
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-        upload.stagingBuffer.upload(&instance, diff.data.data(), upload.stagingBuffer.size);
-        frameUploads.pendingUploads.push_back(std::move(upload));
-    };
-
-    queueBufferUpload(chunkWindowIndexBuffer, worldDiff.chunkWindowIndices);
-    queueBufferUpload(chunkBrickMapBuffer, worldDiff.chunkBrickMaps);
-    queueBufferUpload(brickPoolBuffer, worldDiff.brickData);
+    FrameUploads& uploads = frameUploads.at(currentFrame);
+    queueBufferUpload(uploads, chunkWindowIndexBuffer, worldDiff.chunkWindowIndices.data, byteRegionsFromWordRegions(worldDiff.chunkWindowIndices.regions));
+    queueBufferUpload(uploads, chunkBrickMapBuffer, worldDiff.chunkBrickMaps.data, byteRegionsFromWordRegions(worldDiff.chunkBrickMaps.regions));
 }
 
-void VulkanApp::recordPreparedWorldBufferUploads(VkCommandBuffer commandBuffer) {
-    DeferredUploadResources& frameUploads = deferredUploadResources.at(currentFrame);
-    if (frameUploads.pendingUploads.empty()) {
+void VulkanApp::recordUploads(VkCommandBuffer commandBuffer) {
+    FrameUploads& uploads = frameUploads.at(currentFrame);
+    if (uploads.pending.empty()) {
         return;
     }
 
     std::vector<VkBufferMemoryBarrier> bufferBarriers;
-    bufferBarriers.reserve(frameUploads.pendingUploads.size());
+    bufferBarriers.reserve(uploads.pending.size());
 
-    for (const PendingBufferUpload& upload : frameUploads.pendingUploads) {
+    for (const BufferUpload& upload : uploads.pending) {
         recordBufferCopies(commandBuffer, upload.stagingBuffer.buffer, upload.destinationBuffer, upload.regions);
 
         VkBufferMemoryBarrier barrier{};
@@ -571,12 +706,183 @@ void VulkanApp::recordPreparedWorldBufferUploads(VkCommandBuffer commandBuffer) 
     );
 }
 
-void VulkanApp::cleanupDeferredUploadResources(size_t frameIndex) {
-    DeferredUploadResources& frameUploads = deferredUploadResources.at(frameIndex);
-    for (PendingBufferUpload& upload : frameUploads.pendingUploads) {
+void VulkanApp::cleanupUploads(size_t frameIndex) {
+    FrameUploads& uploads = frameUploads.at(frameIndex);
+    for (BufferUpload& upload : uploads.pending) {
         upload.stagingBuffer.cleanup(&instance);
     }
-    frameUploads.pendingUploads.clear();
+    uploads.pending.clear();
+}
+
+void VulkanApp::queueBufferUpload(FrameUploads& uploads, Buffer& destinationBuffer, const std::vector<uint32_t>& data, const std::vector<BufferCopyRegion>& regions)
+{
+    if (data.empty() || regions.empty()) {
+        return;
+    }
+
+    BufferUpload upload{};
+    upload.destinationBuffer = destinationBuffer.buffer;
+    upload.regions = regions;
+    upload.stagingBuffer.createBuffer(
+        &instance,
+        storageBufferSize(data),
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+    upload.stagingBuffer.upload(&instance, data.data(), storageBufferSize(data));
+    uploads.pending.push_back(std::move(upload));
+}
+
+void VulkanApp::resetRequestBuffer(size_t frameIndex)
+{
+    if (frameIndex >= brickRequestBuffers.size() || brickRequestBuffers[frameIndex].mappedWords == nullptr) {
+        return;
+    }
+
+    uint32_t* words = brickRequestBuffers[frameIndex].mappedWords;
+    words[0] = 0u;
+    words[1] = 0u;
+    words[2] = BRICK_REQUEST_CAPACITY;
+}
+
+void VulkanApp::ensureGpuBrickCapacity(uint32_t requiredCapacity)
+{
+    if (requiredCapacity <= gpuBrickCapacity) {
+        return;
+    }
+
+    const uint32_t newCapacity = growCapacity(gpuBrickCapacity, requiredCapacity);
+    vkDeviceWaitIdle(instance.device());
+
+    Buffer newBrickPoolBuffer{};
+    newBrickPoolBuffer.createBuffer(
+        &instance,
+        storageBufferSize(static_cast<size_t>(newCapacity) * PACKED_BRICK_WORD_COUNT),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+
+    if (brickPoolBuffer.buffer != VK_NULL_HANDLE && nextGpuBrickSlot > 0u) {
+        Buffer::copyBuffer(
+            &instance,
+            brickPoolBuffer.buffer,
+            newBrickPoolBuffer.buffer,
+            std::vector<BufferCopyRegion>{{0, 0, storageBufferSize(static_cast<size_t>(nextGpuBrickSlot) * PACKED_BRICK_WORD_COUNT)}},
+            commandPool
+        );
+        brickPoolBuffer.cleanup(&instance);
+    }
+
+    brickPoolBuffer = newBrickPoolBuffer;
+    gpuBrickCapacity = newCapacity;
+    gpuBrickToCpuBrick.resize(gpuBrickCapacity, BRICK_MAP_EMPTY);
+    createDescriptorSets(false);
+}
+
+void VulkanApp::processBrickRequests(size_t frameIndex)
+{
+    if (world == nullptr || frameIndex >= brickRequestBuffers.size()) {
+        return;
+    }
+
+    RequestBuffer& requestBuffer = brickRequestBuffers[frameIndex];
+    if (requestBuffer.mappedWords == nullptr) {
+        return;
+    }
+
+    const uint32_t requestCount = std::min(requestBuffer.mappedWords[0], BRICK_REQUEST_CAPACITY);
+    lastBrickRequestCount = requestCount;
+    lastDroppedBrickRequestCount = requestBuffer.mappedWords[1];
+    if (requestCount == 0u) {
+        return;
+    }
+
+    FrameUploads& uploads = frameUploads.at(frameIndex);
+    std::vector<uint32_t> brickUploadWords;
+    std::vector<BufferCopyRegion> brickUploadRegions;
+    std::vector<uint32_t> chunkPatchWords;
+    std::vector<BufferCopyRegion> chunkPatchRegions;
+
+    for (uint32_t requestIndex = 0; requestIndex < requestCount; requestIndex++) {
+        const uint32_t packedEntryIndex = requestBuffer.mappedWords[BRICK_REQUEST_HEADER_WORD_COUNT + requestIndex];
+        const uint32_t chunkRecordBase = (packedEntryIndex / packedChunkWordCount()) * packedChunkWordCount();
+        const uint32_t chunkSlotIndex = chunkRecordBase / packedChunkWordCount();
+        if (chunkSlotIndex >= world->getChunkCount()) {
+            continue;
+        }
+        const uint32_t chunkLocalEntryWordOffset = packedEntryIndex - chunkRecordBase;
+        if (chunkLocalEntryWordOffset < CHUNK_ACCEL_WORD_COUNT) {
+            continue;
+        }
+
+        const uint32_t brickEntryWordOffset = chunkLocalEntryWordOffset - CHUNK_ACCEL_WORD_COUNT;
+        if ((brickEntryWordOffset % PACKED_BRICK_MAP_ENTRY_WORD_COUNT) != 0u) {
+            continue;
+        }
+
+        const uint32_t packedBrickIndex = brickEntryWordOffset / PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
+        if (chunkSlotIndex >= world->getChunkCount() || packedBrickIndex >= Chunk::BRICK_COUNT) {
+            continue;
+        }
+        const size_t entryIndex = chunkEntryIndex(chunkSlotIndex, packedBrickIndex);
+        const Chunk::EncodedBrickMap& brickMap = world->getChunkBySlotIndex(chunkSlotIndex).getBrickMap();
+        const glm::uvec3 brickCoord = decodeBrickMorton(packedBrickIndex);
+        const uint32_t linearBrickIndex = brickCoord.x +
+            Chunk::BRICKS_PER_AXIS * (brickCoord.y + Chunk::BRICKS_PER_AXIS * brickCoord.z);
+        const BrickMapEntry& canonicalEntry = brickMap[linearBrickIndex];
+        const uint32_t cpuBrickIndex = canonicalEntry.index;
+        if (cpuBrickIndex == BRICK_MAP_EMPTY || cpuBrickIndex >= cpuBrickToGpuBrick.size()) {
+            continue;
+        }
+        uint32_t gpuBrickSlot = cpuBrickToGpuBrick[cpuBrickIndex];
+        if (gpuBrickSlot == INVALID_GPU_BRICK_SLOT) {
+            ensureGpuBrickCapacity(nextGpuBrickSlot + 1u);
+            gpuBrickSlot = nextGpuBrickSlot++;
+            cpuBrickToGpuBrick[cpuBrickIndex] = gpuBrickSlot;
+            gpuBrickToCpuBrick[gpuBrickSlot] = cpuBrickIndex;
+
+            const size_t brickWordOffset = brickUploadWords.size();
+            brickUploadWords.resize(brickWordOffset + PACKED_BRICK_WORD_COUNT, 0u);
+            const Brick& brick = world->getBrickByIndex(cpuBrickIndex);
+            for (uint32_t maskWordIndex = 0; maskWordIndex < OCCUPANCY_MASK_WORD_COUNT; maskWordIndex++) {
+                brickUploadWords[brickWordOffset + maskWordIndex] = brick.occupancyMaskWords[maskWordIndex];
+            }
+            for (uint32_t z = 0; z < BRICK_SIZE; z++) {
+                for (uint32_t y = 0; y < BRICK_SIZE; y++) {
+                    for (uint32_t x = 0; x < BRICK_SIZE; x++) {
+                        const uint32_t flatIndex = x + BRICK_SIZE * (y + BRICK_SIZE * z);
+                        const size_t packedWordIndex = brickWordOffset + OCCUPANCY_MASK_WORD_COUNT + flatIndex / 4u;
+                        const uint32_t bitShift = 8u * (flatIndex % 4u);
+                        brickUploadWords[packedWordIndex] |= static_cast<uint32_t>(brick.voxels[x][y][z]) << bitShift;
+                    }
+                }
+            }
+            brickUploadRegions.push_back({
+                sizeof(uint32_t) * static_cast<VkDeviceSize>(brickWordOffset),
+                sizeof(uint32_t) * static_cast<VkDeviceSize>(static_cast<size_t>(gpuBrickSlot) * PACKED_BRICK_WORD_COUNT),
+                sizeof(uint32_t) * static_cast<VkDeviceSize>(PACKED_BRICK_WORD_COUNT)
+            });
+        }
+
+        const uint32_t metadataWord = static_cast<uint32_t>(canonicalEntry.materialId) | GPU_BRICK_METADATA_RESIDENT_BIT;
+        const size_t patchWordOffset = chunkPatchWords.size();
+        chunkPatchWords.push_back(gpuBrickSlot);
+        chunkPatchWords.push_back(metadataWord);
+        gpuSlotByChunkEntry[entryIndex] = gpuBrickSlot;
+        setRequestedBit(requestedChunkEntryBits, entryIndex, false);
+        chunkPatchRegions.push_back({
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(patchWordOffset),
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(packedEntryIndex),
+            sizeof(uint32_t) * static_cast<VkDeviceSize>(PACKED_BRICK_MAP_ENTRY_WORD_COUNT)
+        });
+    }
+
+    if (!brickUploadWords.empty()) {
+        queueBufferUpload(uploads, brickPoolBuffer, brickUploadWords, brickUploadRegions);
+    }
+    if (!chunkPatchWords.empty()) {
+        queueBufferUpload(uploads, chunkBrickMapBuffer, chunkPatchWords, chunkPatchRegions);
+    }
 }
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
@@ -584,6 +890,7 @@ void VulkanApp::createDescriptorSets(bool allocateSets) {
     std::vector<VkDescriptorBufferInfo> chunkWindowIndexInfos(MAX_FRAMES_IN_FLIGHT);
     std::vector<VkDescriptorBufferInfo> chunkBrickMapInfos(MAX_FRAMES_IN_FLIGHT);
     std::vector<VkDescriptorBufferInfo> brickPoolInfos(MAX_FRAMES_IN_FLIGHT);
+    std::vector<VkDescriptorBufferInfo> brickRequestInfos(MAX_FRAMES_IN_FLIGHT);
     std::vector<std::vector<DescriptorWrite>> descriptorWrites(MAX_FRAMES_IN_FLIGHT);
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -630,6 +937,18 @@ void VulkanApp::createDescriptorSets(bool allocateSets) {
             &brickPoolInfos[i],
             nullptr
         });
+
+        brickRequestInfos[i].buffer = brickRequestBuffers.at(i).buffer.buffer;
+        brickRequestInfos[i].offset = 0;
+        brickRequestInfos[i].range = brickRequestBuffers.at(i).buffer.size;
+
+        descriptorWrites[i].push_back({
+            4,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            &brickRequestInfos[i],
+            nullptr
+        });
+
     }
 
     if (allocateSets) {
@@ -651,7 +970,7 @@ void VulkanApp::updateFrameTiming() {
     }
 }
 
-void VulkanApp::buildDiagnosticsUi() {
+void VulkanApp::drawStatsUi() {
     const size_t chunkCount = world != nullptr ? world->getChunkCount() : 0;
     const size_t generatedChunkCount = world != nullptr ? world->getGeneratedChunkCount() : 0;
     const uint64_t worldVoxelCount = static_cast<uint64_t>(chunkCount) * Chunk::VOXEL_COUNT;
@@ -678,6 +997,9 @@ void VulkanApp::buildDiagnosticsUi() {
     ImGui::Text("Voxel count: %llu", static_cast<unsigned long long>(worldVoxelCount));
     ImGui::Text("Solid voxels: %llu", static_cast<unsigned long long>(worldStats.solidVoxelCount));
     ImGui::Text("Allocated bricks: %zu / %zu", allocatedBrickCount, brickCapacity);
+    ImGui::Text("GPU resident bricks: %u / %u", nextGpuBrickSlot, gpuBrickCapacity);
+    ImGui::Text("Brick requests: %u", lastBrickRequestCount);
+    ImGui::Text("Dropped brick requests: %u", lastDroppedBrickRequestCount);
     ImGui::Text("Avg chunk load: %.3f ms", worldStats.averageChunkGenerationMs);
     ImGui::Text("World gen total: %.2f ms", worldStats.totalGenerationMs);
     ImGui::Separator();
@@ -699,8 +1021,8 @@ void VulkanApp::buildDiagnosticsUi() {
 
 void VulkanApp::cleanup() {
     vkDeviceWaitIdle(instance.device());
-    for (size_t i = 0; i < deferredUploadResources.size(); i++) {
-        cleanupDeferredUploadResources(i);
+    for (size_t i = 0; i < frameUploads.size(); i++) {
+        cleanupUploads(i);
     }
     cleanupSwapchain();
     cleanupImGui();
@@ -714,6 +1036,15 @@ void VulkanApp::cleanup() {
         vkDestroyPipelineLayout(instance.device(), computePipelineLayout, nullptr);
         computePipelineLayout = VK_NULL_HANDLE;
     }
+
+    for (RequestBuffer& requestBuffer : brickRequestBuffers) {
+        if (requestBuffer.buffer.mapped != nullptr) {
+            requestBuffer.buffer.unmap(&instance);
+        }
+        requestBuffer.buffer.cleanup(&instance);
+        requestBuffer.mappedWords = nullptr;
+    }
+    brickRequestBuffers.clear();
 
     chunkWindowIndexBuffer.cleanup(&instance);
     chunkBrickMapBuffer.cleanup(&instance);
@@ -731,8 +1062,10 @@ void VulkanApp::drawFrame(const Camera& camera) {
     FrameSyncObjects frameSyncObjects = syncManager.getFrame(currentFrame);
 
     vkWaitForFences(instance.device(), 1, &frameSyncObjects.inFlight, VK_TRUE, UINT64_MAX);
-    cleanupDeferredUploadResources(currentFrame);
-    syncWorldBuffers();
+    cleanupUploads(currentFrame);
+    processBrickRequests(static_cast<size_t>(currentFrame));
+    syncWorld();
+    resetRequestBuffer(static_cast<size_t>(currentFrame));
 
     uint32_t imageIndex = 0;
     VkResult result = vkAcquireNextImageKHR(
@@ -756,7 +1089,7 @@ void VulkanApp::drawFrame(const Camera& camera) {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
-    buildDiagnosticsUi();
+    drawStatsUi();
     ImGui::Render();
 
     syncManager.waitForImageIfNeeded(&instance, imageIndex);
@@ -818,7 +1151,7 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
     Image& computeImage = computeImages[currentFrame];
     const VkExtent2D extent = swapchain.getSwapExtent();
 
-    recordPreparedWorldBufferUploads(commandBuffer);
+    recordUploads(commandBuffer);
 
     insertImageBarrier(
         commandBuffer,

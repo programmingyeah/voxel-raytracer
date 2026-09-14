@@ -7,13 +7,17 @@ layout(std430, binding = 1) readonly buffer ChunkWindowIndices {
     uint data[];
 } chunkWindowIndices;
 
-layout(std430, binding = 2) readonly buffer ChunkBrickMaps {
+layout(std430, binding = 2) buffer ChunkBrickMaps {
     uint data[];
 } chunkBrickMaps;
 
 layout(std430, binding = 3) readonly buffer BrickPool {
     uint data[];
 } brickPool;
+
+layout(std430, binding = 4) buffer BrickRequests {
+    uint data[];
+} brickRequests;
 
 layout(push_constant) uniform PushConstants {
     vec4 cameraPos;
@@ -42,6 +46,10 @@ const uint AIR_MATERIAL = 0u;
 const uint STONE_MATERIAL = 1u;
 const uint BRICK_MAP_EMPTY = 0xFFFFFFFFu;
 const uint BRICK_MAP_ENTRY_WORD_COUNT = 2u;
+const uint BRICK_REQUEST_HEADER_WORD_COUNT = 3u;
+const uint BRICK_METADATA_MATERIAL_MASK = 0xFFu;
+const uint BRICK_METADATA_RESIDENT_BIT = 1u << 8u;
+const uint BRICK_METADATA_REQUESTED_BIT = 1u << 9u;
 const uint CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
 const uint CHUNK_ACCEL_8_WORD_COUNT = 16u;
 const uint CHUNK_ACCEL_4_WORD_COUNT = 2u;
@@ -254,16 +262,45 @@ uvec2 loadBrickEntry(uint chunkRecordBase, ivec3 brickCoord) {
     );
 }
 
+uint brickEntryPackedIndex(uint chunkRecordBase, ivec3 brickCoord) {
+    return chunkRecordBase + CHUNK_BRICK_MAP_OFFSET + mortonBrickIndex(brickCoord) * BRICK_MAP_ENTRY_WORD_COUNT;
+}
+
 bool brickEntryHasBrick(uvec2 brickEntry) {
     return brickEntry.x != BRICK_MAP_EMPTY;
 }
 
 uint brickEntryMaterialId(uvec2 brickEntry) {
-    return brickEntry.y;
+    return brickEntry.y & BRICK_METADATA_MATERIAL_MASK;
 }
 
 uint brickEntryIndex(uvec2 brickEntry) {
     return brickEntry.x;
+}
+
+bool brickEntryResident(uvec2 brickEntry) {
+    return (brickEntry.y & BRICK_METADATA_RESIDENT_BIT) != 0u;
+}
+
+bool brickEntryRequested(uvec2 brickEntry) {
+    return (brickEntry.y & BRICK_METADATA_REQUESTED_BIT) != 0u;
+}
+
+void requestBrickIfNeeded(uint packedEntryIndex) {
+    uint previousMetadata = atomicOr(chunkBrickMaps.data[packedEntryIndex + 1u], BRICK_METADATA_REQUESTED_BIT);
+    if ((previousMetadata & BRICK_METADATA_REQUESTED_BIT) != 0u) {
+        return;
+    }
+
+    uint requestIndex = atomicAdd(brickRequests.data[0], 1u);
+    uint requestCapacity = brickRequests.data[2];
+    if (requestIndex >= requestCapacity) {
+        atomicAdd(brickRequests.data[1], 1u);
+        atomicAnd(chunkBrickMaps.data[packedEntryIndex + 1u], ~BRICK_METADATA_REQUESTED_BIT);
+        return;
+    }
+
+    brickRequests.data[BRICK_REQUEST_HEADER_WORD_COUNT + requestIndex] = packedEntryIndex;
 }
 
 int coarseCellIndex(ivec3 coarseCell) {
@@ -328,7 +365,7 @@ uint loadCoarseCellVoxelCached(uvec4 coarseCellVoxelWords, ivec3 cellLocalVoxelM
 vec3 normalForAxis(int axis, int stepSign);
 int selectMinAxis(vec3 v);
 
-bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 cellWorldMin, ivec3 cellLocalVoxelMin, uvec4 coarseCellVoxelWords, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
+bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, uint brickBase, ivec3 cellWorldMin, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
     if (endT <= startT + EPS) {
         return false;
     }
@@ -361,7 +398,12 @@ bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, ivec3 cellWorldMin, ivec3 cellLoc
         ivec3 localVoxelInCell = voxel - cellWorldMin;
         if (all(greaterThanEqual(localVoxelInCell, ivec3(0))) && all(lessThan(localVoxelInCell, ivec3(COARSE_CELL_SIZE)))) {
             counters.voxelTests++;
-            if (loadCoarseCellVoxelCached(coarseCellVoxelWords, cellLocalVoxelMin, localVoxelInCell) != AIR_MATERIAL) {
+            ivec3 localVoxel = (voxel - cellWorldMin) + ivec3(
+                (cellWorldMin.x & (BRICK_SIZE - 1)),
+                (cellWorldMin.y & (BRICK_SIZE - 1)),
+                (cellWorldMin.z & (BRICK_SIZE - 1))
+            );
+            if (loadBrickVoxel(brickBase, localVoxel) != AIR_MATERIAL) {
                 hitT = t;
                 hitNormal = currentNormal;
                 return true;
@@ -483,8 +525,7 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
         if (loadBrickCoarseOccupancyCached(coarseOccupancyWords, localCell)) {
             ivec3 cellWorldMin = brickWorldMin + localCell * COARSE_CELL_SIZE;
             ivec3 cellLocalVoxelMin = localCell * COARSE_CELL_SIZE;
-            uvec4 coarseCellVoxelWords = loadCoarseCellVoxelWords(brickBase, cellLocalVoxelMin);
-            if (traceOccupiedCoarseCell(ro, rd, cellWorldMin, cellLocalVoxelMin, coarseCellVoxelWords, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+            if (traceOccupiedCoarseCell(ro, rd, brickBase, cellWorldMin, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
                 return true;
             }
         }
@@ -571,6 +612,7 @@ bool traceChunkBrickRange(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecor
     int maxBrickSteps = (brickMaxExclusive.x - brickMin.x) * (brickMaxExclusive.y - brickMin.y) * (brickMaxExclusive.z - brickMin.z);
     for (int i = 0; i < maxBrickSteps; i++) {
         counters.brickSteps++;
+        uint packedEntryIndex = brickEntryPackedIndex(chunkRecordBase, localBrick);
         uvec2 entry = loadBrickEntry(chunkRecordBase, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
@@ -582,10 +624,16 @@ bool traceChunkBrickRange(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecor
                 return true;
             }
         } else {
-            ivec3 brickWorldMin = chunkWorldMin + localBrick * BRICK_SIZE;
-            if (traceBrick(ro, rd, brickWorldMin, brickEntryIndex(entry), t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
-                hitMaterialId = brickEntryMaterialId(entry);
-                return true;
+            if (!brickEntryResident(entry)) {
+                if (!brickEntryRequested(entry)) {
+                    requestBrickIfNeeded(packedEntryIndex);
+                }
+            } else {
+                ivec3 brickWorldMin = chunkWorldMin + localBrick * BRICK_SIZE;
+                if (traceBrick(ro, rd, brickWorldMin, brickEntryIndex(entry), t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+                    hitMaterialId = brickEntryMaterialId(entry);
+                    return true;
+                }
             }
         }
 

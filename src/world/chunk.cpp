@@ -192,7 +192,7 @@ void Chunk::clear() {
         entry = makeBrickMapEntry(AIR_MATERIAL);
     }
 
-    markWholeChunkDirty();
+    markChunkDirty();
 }
 
 void Chunk::resetBrickMapToAirNoCallbacks() {
@@ -201,7 +201,7 @@ void Chunk::resetBrickMapToAirNoCallbacks() {
     }
 }
 
-void Chunk::setStorageCallbacks(
+void Chunk::bindStorage(
     std::vector<Brick>* inBrickPool,
     AllocateBrickCallback inAllocateBrickCallback,
     ReleaseBrickCallback inReleaseBrickCallback,
@@ -251,7 +251,7 @@ void Chunk::markBrickMapDirty(uint32_t mapIndex) {
     }
 }
 
-void Chunk::markWholeChunkDirty() {
+void Chunk::markChunkDirty() {
     if (!chunkBrickMapDirtyCallback) {
         return;
     }

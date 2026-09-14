@@ -49,6 +49,7 @@ public:
     const Chunk& getChunk(uint32_t x, uint32_t y, uint32_t z) const;
     Chunk& getChunkByWindowIndex(size_t localWindowIndex);
     const Chunk& getChunkByWindowIndex(size_t localWindowIndex) const;
+    const Chunk& getChunkBySlotIndex(size_t chunkSlotIndex) const;
 
     bool containsVoxel(int32_t x, int32_t y, int32_t z) const;
     uint32_t getVoxel(uint32_t x, uint32_t y, uint32_t z) const;
@@ -66,6 +67,7 @@ public:
 
     size_t getBrickCapacity() const { return brickPool.bricks.size(); }
     size_t getAllocatedBrickCount() const;
+    const Brick& getBrickByIndex(uint32_t brickIndex) const;
 
     uint64_t getTotalSolidVoxelCount() const;
     size_t getGeneratedChunkCount() const;
@@ -76,8 +78,7 @@ private:
     friend GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world);
     friend void clearGpuUploadDirtyState(VoxelWorld& world);
 
-    Chunk& getChunkBySlotIndex(size_t chunkSlotIndex);
-    const Chunk& getChunkBySlotIndex(size_t chunkSlotIndex) const;
+    Chunk& getChunkByMutableSlotIndex(size_t chunkSlotIndex);
     size_t getChunkSlotIndexByWindowIndex(size_t localWindowIndex) const;
     size_t chunkIndex(uint32_t x, uint32_t y, uint32_t z) const;
     glm::uvec3 chunkCoordFromWindowIndex(size_t localWindowIndex) const;

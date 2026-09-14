@@ -4,15 +4,9 @@
 #include <chrono>
 #include <iostream>
 
-// note to future self: implement SDF at the BrickMap level, you gain sparsity win with little cost, 
-// test result: with 16 chunk render distance (204 meters), SDF data would be 2 MiB, brick data would be 150 MiB (awesome?)
-
-// second note: i am aware of the god awful performance, this is just because were assuming a worst-case amount of bricks per chunk
-// in the future we will use a fixed size buffer and dynamically evict bricks based on usage, optimization is not the goal yet
-
 namespace {
 //settings
-constexpr uint32_t RENDER_DISTANCE = 10;
+constexpr uint32_t RENDER_DISTANCE = 5;
 constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
 
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
@@ -141,4 +135,3 @@ int main() {
         return EXIT_FAILURE;
     }
 }
-

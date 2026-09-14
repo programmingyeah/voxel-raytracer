@@ -44,7 +44,7 @@ VoxelWorld::VoxelWorld(glm::uvec3 inChunkCounts) : chunkCounts(inChunkCounts) {
                         currentChunkIndex
                     )
                 });
-                slots.back().chunk.setStorageCallbacks(
+                slots.back().chunk.bindStorage(
                     &brickPool.bricks,
                     [this]() { return allocateBrick(); },
                     [this](uint32_t brickIndex) { releaseBrick(brickIndex); },
@@ -76,7 +76,7 @@ const Chunk& VoxelWorld::getChunkByWindowIndex(size_t localWindowIndex) const {
     return slots.at(window.at(localWindowIndex)).chunk;
 }
 
-Chunk& VoxelWorld::getChunkBySlotIndex(size_t chunkSlotIndex) {
+Chunk& VoxelWorld::getChunkByMutableSlotIndex(size_t chunkSlotIndex) {
     return slots.at(chunkSlotIndex).chunk;
 }
 
@@ -367,6 +367,10 @@ size_t VoxelWorld::getGeneratedChunkCount() const {
 size_t VoxelWorld::getAllocatedBrickCount() const {
     std::lock_guard<std::mutex> brickPoolLock(brickPoolMutex);
     return brickPool.bricks.size() - brickPool.free.size();
+}
+
+const Brick& VoxelWorld::getBrickByIndex(uint32_t brickIndex) const {
+    return brickPool.bricks.at(brickIndex);
 }
 
 size_t VoxelWorld::chunkIndex(uint32_t x, uint32_t y, uint32_t z) const {
