@@ -51,6 +51,7 @@ private:
     std::vector<uint64_t> requestedChunkEntryBits;
     std::vector<uint32_t> cpuBrickToGpuBrick;
     std::vector<uint32_t> gpuBrickToCpuBrick;
+    std::vector<uint32_t> gpuBrickPoolFree;
     uint32_t gpuBrickCapacity = 0;
     uint32_t nextGpuBrickSlot = 0;
     static constexpr uint32_t INVALID_GPU_BRICK_SLOT = std::numeric_limits<uint32_t>::max();

@@ -97,13 +97,6 @@ size_t chunkEntryIndex(size_t chunkSlotIndex, uint32_t packedBrickIndex)
     return chunkSlotIndex * Chunk::BRICK_COUNT + packedBrickIndex;
 }
 
-bool requestedBit(const std::vector<uint64_t>& bits, size_t entryIndex)
-{
-    const size_t wordIndex = entryIndex / 64u;
-    const uint64_t mask = 1ull << (entryIndex % 64u);
-    return wordIndex < bits.size() && (bits[wordIndex] & mask) != 0u;
-}
-
 void setRequestedBit(std::vector<uint64_t>& bits, size_t entryIndex, bool value)
 {
     const size_t wordIndex = entryIndex / 64u;
@@ -124,7 +117,8 @@ void applyChunkMapDiff(
     std::vector<uint32_t>& gpuSlotByChunkEntry,
     std::vector<uint64_t>& requestedChunkEntryBits,
     std::vector<uint32_t>& cpuBrickToGpuBrick,
-    const std::vector<uint32_t>& gpuBrickToCpuBrick,
+    std::vector<uint32_t>& gpuBrickToCpuBrick,
+    std::vector<uint32_t>& gpuBrickPoolFree,
     const std::vector<uint32_t>& data,
     const std::vector<GpuBufferCopyRegion>& regions
 ) {
@@ -148,6 +142,11 @@ void applyChunkMapDiff(
                 const uint32_t cpuBrickIndex = gpuBrickToCpuBrick[oldGpuSlot];
                 if (cpuBrickIndex < cpuBrickToGpuBrick.size() && cpuBrickToGpuBrick[cpuBrickIndex] == oldGpuSlot) {
                     cpuBrickToGpuBrick[cpuBrickIndex] = INVALID_GPU_BRICK_SLOT_VALUE;
+                }
+
+                if (gpuBrickToCpuBrick[oldGpuSlot] != BRICK_MAP_EMPTY) {
+                    gpuBrickToCpuBrick[oldGpuSlot] = BRICK_MAP_EMPTY;
+                    gpuBrickPoolFree.push_back(oldGpuSlot);
                 }
             }
 
@@ -173,6 +172,25 @@ uint32_t growCapacity(uint32_t currentCapacity, uint32_t requiredCapacity)
     }
 
     return newCapacity;
+}
+
+uint32_t allocateGpuBrickSlot(
+    std::vector<uint32_t>& gpuBrickPoolFree,
+    uint32_t& nextGpuBrickSlot,
+    uint32_t gpuBrickCapacity
+)
+{
+    if (!gpuBrickPoolFree.empty()) {
+        const uint32_t gpuBrickSlot = gpuBrickPoolFree.back();
+        gpuBrickPoolFree.pop_back();
+        return gpuBrickSlot;
+    }
+
+    if (nextGpuBrickSlot >= gpuBrickCapacity) {
+        return INVALID_GPU_BRICK_SLOT_VALUE;
+    }
+
+    return nextGpuBrickSlot++;
 }
 
 //inverts the 4-bit-per-axis morton layout used for chunk brick map entries:
@@ -579,6 +597,7 @@ void VulkanApp::createWorldBuffers() {
     requestedChunkEntryBits.assign((gpuSlotByChunkEntry.size() + 63u) / 64u, 0u);
     cpuBrickToGpuBrick.assign(world->getBrickCapacity(), INVALID_GPU_BRICK_SLOT);
     gpuBrickToCpuBrick.assign(gpuBrickCapacity, BRICK_MAP_EMPTY);
+    gpuBrickPoolFree.clear();
 
     const VkDeviceSize brickPoolBufferSize = storageBufferSize(static_cast<size_t>(gpuBrickCapacity) * PACKED_BRICK_WORD_COUNT);
     const VkDeviceSize brickRequestBufferSize = storageBufferSize(static_cast<size_t>(BRICK_REQUEST_HEADER_WORD_COUNT + BRICK_REQUEST_CAPACITY));
@@ -664,7 +683,7 @@ void VulkanApp::syncWorld() {
         return;
     }
 
-    applyChunkMapDiff(gpuSlotByChunkEntry, requestedChunkEntryBits, cpuBrickToGpuBrick, gpuBrickToCpuBrick, worldDiff.chunkBrickMaps.data, worldDiff.chunkBrickMaps.regions);
+    applyChunkMapDiff(gpuSlotByChunkEntry, requestedChunkEntryBits, cpuBrickToGpuBrick, gpuBrickToCpuBrick, gpuBrickPoolFree, worldDiff.chunkBrickMaps.data, worldDiff.chunkBrickMaps.regions);
 
     FrameUploads& uploads = frameUploads.at(currentFrame);
     queueBufferUpload(uploads, chunkWindowIndexBuffer, worldDiff.chunkWindowIndices.data, byteRegionsFromWordRegions(worldDiff.chunkWindowIndices.regions));
@@ -836,8 +855,12 @@ void VulkanApp::processBrickRequests(size_t frameIndex)
         }
         uint32_t gpuBrickSlot = cpuBrickToGpuBrick[cpuBrickIndex];
         if (gpuBrickSlot == INVALID_GPU_BRICK_SLOT) {
-            ensureGpuBrickCapacity(nextGpuBrickSlot + 1u);
-            gpuBrickSlot = nextGpuBrickSlot++;
+            const uint32_t requiredCapacity = gpuBrickPoolFree.empty() ? nextGpuBrickSlot + 1u : nextGpuBrickSlot;
+            ensureGpuBrickCapacity(requiredCapacity);
+            gpuBrickSlot = allocateGpuBrickSlot(gpuBrickPoolFree, nextGpuBrickSlot, gpuBrickCapacity);
+            if (gpuBrickSlot == INVALID_GPU_BRICK_SLOT) {
+                continue;
+            }
             cpuBrickToGpuBrick[cpuBrickIndex] = gpuBrickSlot;
             gpuBrickToCpuBrick[gpuBrickSlot] = cpuBrickIndex;
 
