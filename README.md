@@ -41,7 +41,7 @@ cmake --build build
 ### Windows
 
 Install first:
-- a working C++ toolchain usable from Command Prompt, such as MinGW-w64
+- Visual Studio 2022 or Build Tools with the C++ workload
 - CMake
 - Vulkan SDK
 - GLFW with a CMake package config available
@@ -59,10 +59,18 @@ cd voxel_tracer
 scripts\build_windows.bat
 ```
 
+Run the batch file from a Developer Command Prompt for Visual Studio for the most reliable results.
+
 If you use vcpkg, pass its toolchain file as the first argument:
 
 ```bat
 scripts\build_windows.bat C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+```
+
+If you want to override the CMake generator, pass it as the second argument:
+
+```bat
+scripts\build_windows.bat "" "Ninja"
 ```
 
 The build automatically compiles:
