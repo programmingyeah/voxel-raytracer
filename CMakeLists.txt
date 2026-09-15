@@ -10,8 +10,22 @@ include(FetchContent)
 find_package(Vulkan REQUIRED)
 
 # GLFW
-find_package(PkgConfig REQUIRED)
-pkg_search_module(GLFW REQUIRED glfw3)
+set(GLFW_TARGET glfw)
+if(WIN32)
+    find_package(glfw3 CONFIG REQUIRED)
+    if(TARGET glfw)
+        set(GLFW_TARGET glfw)
+    elseif(TARGET glfw3)
+        set(GLFW_TARGET glfw3)
+    elseif(TARGET glfw3::glfw)
+        set(GLFW_TARGET glfw3::glfw)
+    else()
+        message(FATAL_ERROR "Could not find a supported GLFW target on Windows")
+    endif()
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_search_module(GLFW REQUIRED glfw3)
+endif()
 
 # Threads
 find_package(Threads REQUIRED)
@@ -80,7 +94,6 @@ add_dependencies(voxel_tracer compile_shaders)
 # Include directories
 target_include_directories(voxel_tracer PRIVATE
     ${Vulkan_INCLUDE_DIRS}
-    ${GLFW_INCLUDE_DIRS}
     ${GLM_INCLUDE_DIR}
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
@@ -89,13 +102,21 @@ target_include_directories(voxel_tracer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/world
 )
 
+if(NOT WIN32)
+    target_include_directories(voxel_tracer PRIVATE ${GLFW_INCLUDE_DIRS})
+endif()
+
 # Link libraries
 target_link_libraries(voxel_tracer
     ${Vulkan_LIBRARIES}
-    ${GLFW_LIBRARIES}
     Threads::Threads
-    dl
 )
+
+if(WIN32)
+    target_link_libraries(voxel_tracer ${GLFW_TARGET})
+else()
+    target_link_libraries(voxel_tracer ${GLFW_LIBRARIES} dl)
+endif()
 
 # Pass runtime paths
 target_compile_definitions(voxel_tracer PRIVATE
