@@ -41,7 +41,7 @@ cmake --build build
 ### Windows
 
 Install first:
-- Visual Studio 2022 or Build Tools with C++ support
+- a working C++ toolchain usable from Command Prompt, such as MinGW-w64
 - CMake
 - Vulkan SDK
 - GLFW with a CMake package config available
@@ -69,6 +69,8 @@ The build automatically compiles:
 - `src/assets/shaders/shader.comp`
 - output SPIR-V: `build/shaders/comp.spv`
 
+If `build-windows` only contains `CMakeCache.txt` and `CMakeFiles`, configuration likely succeeded but the actual compile step failed. The batch script now pauses so you can read the error.
+
 ## Run
 
 ```bash README.md
@@ -78,7 +80,7 @@ The build automatically compiles:
 On Windows, the executable will typically be under:
 
 ```bat
-.\build-windows\Release\voxel_tracer.exe
+.\build-windows\voxel_tracer.exe
 ```
 
 ## Controls
