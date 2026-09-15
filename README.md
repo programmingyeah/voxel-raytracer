@@ -53,13 +53,17 @@ Recommended dependency setup:
 
 Example:
 
-```powershell README.md
+```bat
 git clone <your-repo-url> voxel_tracer
 cd voxel_tracer
-./scripts/build_windows.ps1
+scripts\build_windows.bat
 ```
 
-If you use vcpkg, configure CMake with its toolchain file before building, for example by editing the script invocation or running CMake manually.
+If you use vcpkg, pass its toolchain file as the first argument:
+
+```bat
+scripts\build_windows.bat C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+```
 
 The build automatically compiles:
 - `src/assets/shaders/shader.comp`
@@ -73,7 +77,7 @@ The build automatically compiles:
 
 On Windows, the executable will typically be under:
 
-```powershell README.md
+```bat
 .\build-windows\Release\voxel_tracer.exe
 ```
 
