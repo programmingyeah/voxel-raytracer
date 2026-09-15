@@ -63,7 +63,7 @@ void packChunkRecord(
     std::vector<uint32_t>& chunkBrickMaps,
     size_t chunkSlotIndex,
     const Chunk::EncodedBrickMap& brickMap,
-    bool chunkGenerated
+    ChunkRuntimeState chunkState
 ) {
     const size_t chunkBaseIndex = chunkSlotIndex * PACKED_CHUNK_WORD_COUNT;
     std::fill_n(
@@ -72,8 +72,8 @@ void packChunkRecord(
         0u
     );
 
-    if (!chunkGenerated) {
-        chunkBrickMaps[chunkBaseIndex] = CHUNK_ACCEL_EMPTY_FLAG;
+    if (chunkState != ChunkRuntimeState::Generated) {
+        chunkBrickMaps[chunkBaseIndex] = CHUNK_ACCEL_EMPTY_FLAG | CHUNK_ACCEL_MISSING_FLAG;
         return;
     }
 
@@ -144,7 +144,7 @@ GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world, WorldLod lod) {
             gpuBuffers.chunkBrickMaps,
             chunkSlotIndex,
             storage.slots[chunkSlotIndex].chunk.getBrickMap(),
-            world.isChunkSlotGenerated(lod, chunkSlotIndex)
+            world.chunkStateBySlotIndex(lod, chunkSlotIndex)
         );
     }
 
@@ -193,7 +193,7 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world, WorldLod lod) {
                 worldDiff.chunkBrickMaps.data,
                 srcWordOffset / PACKED_CHUNK_WORD_COUNT + chunkOffset,
                 storage.slots[chunkSlotIndex].chunk.getBrickMap(),
-                world.isChunkSlotGenerated(lod, chunkSlotIndex)
+                world.chunkStateBySlotIndex(lod, chunkSlotIndex)
             );
         }
     }

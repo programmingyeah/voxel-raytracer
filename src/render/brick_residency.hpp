@@ -6,6 +6,7 @@
 #include "renderer_shared.hpp"
 #include "../world/chunk.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -27,7 +28,7 @@ public:
         uint32_t* mappedWords = nullptr;
     };
 
-    void initializeForWorld(const VoxelWorld& world, WorldLod lod);
+    void initializeForWorld(const VoxelWorld& world);
     void createRequestBuffers(Instance& instance, size_t frameCount);
     void destroyRequestBuffers(Instance& instance);
     void rebuildTrackedState(VoxelWorld& world, WorldLod lod, const std::vector<uint32_t>& chunkBrickMapWords, const std::vector<struct GpuBufferCopyRegion>& regions);
@@ -51,23 +52,23 @@ public:
         VulkanApp& renderer
     );
 
-    const std::vector<RequestBuffer>& getRequestBuffers() const { return requestBuffers; }
-    std::vector<RequestBuffer>& getRequestBuffers() { return requestBuffers; }
+    const std::vector<RequestBuffer>& getRequestBuffers(WorldLod lod) const { return requestBuffers.at(static_cast<size_t>(lod)); }
+    std::vector<RequestBuffer>& getRequestBuffers(WorldLod lod) { return requestBuffers.at(static_cast<size_t>(lod)); }
     uint32_t getGpuBrickCapacity() const { return gpuBrickCapacity; }
-    uint32_t getNextGpuBrickSlot() const { return nextGpuBrickSlot; }
-    uint32_t getLastBrickRequestCount() const { return lastBrickRequestCount; }
-    uint32_t getLastDroppedBrickRequestCount() const { return lastDroppedBrickRequestCount; }
-    WorldLod getLod() const { return lod; }
+    uint32_t getAllocatedGpuBrickCount() const { return nextGpuBrickSlot; }
+    uint32_t getResidentGpuBrickCount() const { return nextGpuBrickSlot - static_cast<uint32_t>(freeGpuBrickSlots.size()); }
+    uint32_t getLastBrickRequestCount(WorldLod lod) const { return lastBrickRequestCount.at(static_cast<size_t>(lod)); }
+    uint32_t getLastDroppedBrickRequestCount(WorldLod lod) const { return lastDroppedBrickRequestCount.at(static_cast<size_t>(lod)); }
 
 private:
-    WorldLod lod{};
-    std::vector<RequestBuffer> requestBuffers;
-    std::vector<uint32_t> gpuSlotByChunkEntry;
-    std::vector<uint64_t> requestedChunkEntryBits;
+    std::array<std::vector<RequestBuffer>, WORLD_LOD_COUNT> requestBuffers;
+    std::array<std::vector<uint32_t>, WORLD_LOD_COUNT> gpuSlotByChunkEntry;
+    std::array<std::vector<uint64_t>, WORLD_LOD_COUNT> requestedChunkEntryBits;
     std::vector<uint32_t> cpuBrickToGpuBrick;
     std::vector<uint32_t> gpuBrickToCpuBrick;
+    std::vector<uint32_t> freeGpuBrickSlots;
     uint32_t gpuBrickCapacity = 0;
     uint32_t nextGpuBrickSlot = 0;
-    uint32_t lastBrickRequestCount = 0;
-    uint32_t lastDroppedBrickRequestCount = 0;
+    std::array<uint32_t, WORLD_LOD_COUNT> lastBrickRequestCount{};
+    std::array<uint32_t, WORLD_LOD_COUNT> lastDroppedBrickRequestCount{};
 };

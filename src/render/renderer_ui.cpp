@@ -6,7 +6,7 @@
 
 namespace {
 constexpr uint32_t BASE_RENDER_DISTANCE_CHUNKS = 5u;
-constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
+constexpr uint32_t WORLD_HEIGHT_CHUNKS = 5u;
 }
 
 void VulkanApp::updateFrameTiming() {
@@ -66,6 +66,12 @@ void VulkanApp::drawStatsUi() {
     ImGui::Text("Avg chunk load: %.3f ms", worldStats.averageChunkGenerationMs);
     ImGui::Text("World gen total: %.2f ms", worldStats.totalGenerationMs);
 
+    ImGui::Text("Shared GPU brick pool: %.2f MB (%u resident, %u allocated, %u capacity)",
+        static_cast<double>(sharedBrickPoolBuffer.size) / (1024.0 * 1024.0),
+        brickResidency.getResidentGpuBrickCount(),
+        brickResidency.getAllocatedGpuBrickCount(),
+        brickResidency.getGpuBrickCapacity());
+
     if (ImGui::TreeNode("LOD summary")) {
         for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
             const WorldLod lod = static_cast<WorldLod>(lodIndex);
@@ -73,14 +79,14 @@ void VulkanApp::drawStatsUi() {
             const size_t lodGeneratedChunkCount = world != nullptr ? world->getGeneratedChunkCount(lod) : 0;
             const auto& lodGpu = gpuLods.at(lodIndex);
             ImGui::Text(
-                "LOD%zu  gen %zu/%zu  resident %u/%u  requests %u  dropped %u",
+                "LOD%zu  gen %zu/%zu  requests %u  dropped %u  chunkIdx %.2f KB  chunkMap %.2f KB",
                 lodIndex,
                 lodGeneratedChunkCount,
                 lodChunkCount,
-                lodGpu.brickResidency.getNextGpuBrickSlot(),
-                lodGpu.brickResidency.getGpuBrickCapacity(),
-                lodGpu.brickResidency.getLastBrickRequestCount(),
-                lodGpu.brickResidency.getLastDroppedBrickRequestCount()
+                brickResidency.getLastBrickRequestCount(lod),
+                brickResidency.getLastDroppedBrickRequestCount(lod),
+                static_cast<double>(lodGpu.chunkWindowIndexBuffer.size) / 1024.0,
+                static_cast<double>(lodGpu.chunkBrickMapBuffer.size) / 1024.0
             );
         }
         ImGui::TreePop();

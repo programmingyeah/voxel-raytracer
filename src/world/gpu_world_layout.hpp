@@ -13,6 +13,7 @@
 
 inline constexpr uint32_t BRICK_REQUEST_HEADER_WORD_COUNT = 3u;
 inline constexpr uint32_t CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
+inline constexpr uint32_t CHUNK_ACCEL_MISSING_FLAG = 1u << 1u;
 inline constexpr uint32_t CHUNK_ACCEL_8_WORD_COUNT = (8u * 8u * 8u + 31u) / 32u;
 inline constexpr uint32_t CHUNK_ACCEL_4_WORD_COUNT = (4u * 4u * 4u + 31u) / 32u;
 inline constexpr uint32_t CHUNK_ACCEL_2_WORD_COUNT = (2u * 2u * 2u + 31u) / 32u;

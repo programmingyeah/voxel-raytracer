@@ -310,12 +310,12 @@ void VulkanApp::cleanup() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
 
+    brickResidency.destroyRequestBuffers(instance);
     for (auto& gpuLod : gpuLods) {
-        gpuLod.brickResidency.destroyRequestBuffers(instance);
         gpuLod.chunkWindowIndexBuffer.cleanup(&instance);
         gpuLod.chunkBrickMapBuffer.cleanup(&instance);
-        gpuLod.brickPoolBuffer.cleanup(&instance);
     }
+    sharedBrickPoolBuffer.cleanup(&instance);
     worldMetadataBuffer.cleanup(&instance);
     descriptorManager.cleanup(&instance);
     syncManager.cleanup(&instance);

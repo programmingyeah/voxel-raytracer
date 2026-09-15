@@ -33,55 +33,69 @@ uint32_t growCapacity(uint32_t currentCapacity, uint32_t requiredCapacity)
 }
 }
 
-void BrickResidencyManager::initializeForWorld(const VoxelWorld& world, WorldLod inLod)
+void BrickResidencyManager::initializeForWorld(const VoxelWorld& world)
 {
-    lod = inLod;
     gpuBrickCapacity = std::min<uint32_t>(static_cast<uint32_t>(world.getBrickCapacity()), INITIAL_GPU_BRICK_CAPACITY);
     if (gpuBrickCapacity == 0u) {
         gpuBrickCapacity = 1u;
     }
 
     nextGpuBrickSlot = 0u;
-    gpuSlotByChunkEntry.assign(chunkEntryCount(world.getChunkCount(lod)), INVALID_GPU_BRICK_SLOT);
-    requestedChunkEntryBits.assign((gpuSlotByChunkEntry.size() + 63u) / 64u, 0u);
+    freeGpuBrickSlots.clear();
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        const WorldLod lod = static_cast<WorldLod>(lodIndex);
+        gpuSlotByChunkEntry[lodIndex].assign(chunkEntryCount(world.getChunkCount(lod)), INVALID_GPU_BRICK_SLOT);
+        requestedChunkEntryBits[lodIndex].assign((gpuSlotByChunkEntry[lodIndex].size() + 63u) / 64u, 0u);
+        lastBrickRequestCount[lodIndex] = 0u;
+        lastDroppedBrickRequestCount[lodIndex] = 0u;
+    }
     cpuBrickToGpuBrick.assign(world.getBrickCapacity(), INVALID_GPU_BRICK_SLOT);
     gpuBrickToCpuBrick.assign(gpuBrickCapacity, BRICK_MAP_EMPTY);
-    lastBrickRequestCount = 0u;
-    lastDroppedBrickRequestCount = 0u;
 }
 
 void BrickResidencyManager::createRequestBuffers(Instance& instance, size_t frameCount)
 {
     destroyRequestBuffers(instance);
-    requestBuffers.resize(frameCount);
-
     const VkDeviceSize brickRequestBufferSize = storageBufferSize(static_cast<size_t>(BRICK_REQUEST_HEADER_WORD_COUNT + BRICK_REQUEST_CAPACITY));
-    for (RequestBuffer& requestBuffer : requestBuffers) {
+    for (auto& perLodBuffers : requestBuffers) {
+        perLodBuffers.resize(frameCount);
+        for (RequestBuffer& requestBuffer : perLodBuffers) {
         requestBuffer.buffer.createBuffer(
             &instance,
             brickRequestBufferSize,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
         );
-        requestBuffer.buffer.map(&instance);
-        requestBuffer.mappedWords = static_cast<uint32_t*>(requestBuffer.buffer.mapped);
+            requestBuffer.buffer.map(&instance);
+            requestBuffer.mappedWords = static_cast<uint32_t*>(requestBuffer.buffer.mapped);
+        }
     }
 
-    for (size_t frameIndex = 0; frameIndex < requestBuffers.size(); frameIndex++) {
-        resetRequestBuffer(frameIndex);
+    if (!requestBuffers.empty()) {
+        for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+            for (size_t frameIndex = 0; frameIndex < requestBuffers[lodIndex].size(); frameIndex++) {
+                RequestBuffer& requestBuffer = requestBuffers[lodIndex][frameIndex];
+                uint32_t* words = requestBuffer.mappedWords;
+                words[0] = 0u;
+                words[1] = 0u;
+                words[2] = BRICK_REQUEST_CAPACITY;
+            }
+        }
     }
 }
 
 void BrickResidencyManager::destroyRequestBuffers(Instance& instance)
 {
-    for (RequestBuffer& requestBuffer : requestBuffers) {
+    for (auto& perLodBuffers : requestBuffers) {
+        for (RequestBuffer& requestBuffer : perLodBuffers) {
         if (requestBuffer.buffer.mapped != nullptr) {
             requestBuffer.buffer.unmap(&instance);
         }
         requestBuffer.buffer.cleanup(&instance);
         requestBuffer.mappedWords = nullptr;
+        }
+        perLodBuffers.clear();
     }
-    requestBuffers.clear();
 }
 
 void BrickResidencyManager::rebuildTrackedState(VoxelWorld& world, WorldLod rebuildLod, const std::vector<uint32_t>& data, const std::vector<GpuBufferCopyRegion>& regions)
@@ -101,20 +115,22 @@ void BrickResidencyManager::rebuildTrackedState(VoxelWorld& world, WorldLod rebu
             const uint32_t packedBrickIndex = static_cast<uint32_t>((chunkLocalWordIndex - CHUNK_ACCEL_WORD_COUNT) / PACKED_BRICK_MAP_ENTRY_WORD_COUNT);
             const size_t entryIndex = chunkEntryIndex(chunkSlotIndex, packedBrickIndex);
 
-            const uint32_t oldGpuSlot = gpuSlotByChunkEntry[entryIndex];
+            const uint32_t oldGpuSlot = gpuSlotByChunkEntry[static_cast<size_t>(rebuildLod)][entryIndex];
             if (oldGpuSlot < gpuBrickToCpuBrick.size()) {
                 const uint32_t cpuBrickIndex = gpuBrickToCpuBrick[oldGpuSlot];
                 if (cpuBrickIndex < cpuBrickToGpuBrick.size() && cpuBrickToGpuBrick[cpuBrickIndex] == oldGpuSlot) {
                     cpuBrickToGpuBrick[cpuBrickIndex] = INVALID_GPU_BRICK_SLOT;
+                    gpuBrickToCpuBrick[oldGpuSlot] = BRICK_MAP_EMPTY;
+                    freeGpuBrickSlots.push_back(oldGpuSlot);
                 }
             }
 
-            gpuSlotByChunkEntry[entryIndex] = INVALID_GPU_BRICK_SLOT;
-            setRequestedBit(requestedChunkEntryBits, entryIndex, false);
+            gpuSlotByChunkEntry[static_cast<size_t>(rebuildLod)][entryIndex] = INVALID_GPU_BRICK_SLOT;
+            setRequestedBit(requestedChunkEntryBits[static_cast<size_t>(rebuildLod)], entryIndex, false);
 
             const uint32_t newMetadata = data[srcStart + wordOffset + 1u];
             if ((newMetadata & GPU_BRICK_METADATA_REQUESTED_BIT) != 0u) {
-                setRequestedBit(requestedChunkEntryBits, entryIndex, true);
+                setRequestedBit(requestedChunkEntryBits[static_cast<size_t>(rebuildLod)], entryIndex, true);
             }
         }
     }
@@ -122,14 +138,15 @@ void BrickResidencyManager::rebuildTrackedState(VoxelWorld& world, WorldLod rebu
 
 void BrickResidencyManager::resetRequestBuffer(size_t frameIndex)
 {
-    if (frameIndex >= requestBuffers.size() || requestBuffers[frameIndex].mappedWords == nullptr) {
-        return;
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        if (frameIndex >= requestBuffers[lodIndex].size() || requestBuffers[lodIndex][frameIndex].mappedWords == nullptr) {
+            continue;
+        }
+        uint32_t* words = requestBuffers[lodIndex][frameIndex].mappedWords;
+        words[0] = 0u;
+        words[1] = 0u;
+        words[2] = BRICK_REQUEST_CAPACITY;
     }
-
-    uint32_t* words = requestBuffers[frameIndex].mappedWords;
-    words[0] = 0u;
-    words[1] = 0u;
-    words[2] = BRICK_REQUEST_CAPACITY;
 }
 
 void BrickResidencyManager::ensureGpuBrickCapacity(
@@ -184,18 +201,19 @@ void BrickResidencyManager::processBrickRequests(
     VulkanApp& renderer
 )
 {
-    if (frameIndex >= requestBuffers.size()) {
+    const size_t lodIndex = static_cast<size_t>(requestLod);
+    if (lodIndex >= WORLD_LOD_COUNT || frameIndex >= requestBuffers[lodIndex].size()) {
         return;
     }
 
-    RequestBuffer& requestBuffer = requestBuffers[frameIndex];
+    RequestBuffer& requestBuffer = requestBuffers[lodIndex][frameIndex];
     if (requestBuffer.mappedWords == nullptr) {
         return;
     }
 
     const uint32_t requestCount = std::min(requestBuffer.mappedWords[0], BRICK_REQUEST_CAPACITY);
-    lastBrickRequestCount = requestCount;
-    lastDroppedBrickRequestCount = requestBuffer.mappedWords[1];
+    lastBrickRequestCount[lodIndex] = requestCount;
+    lastDroppedBrickRequestCount[lodIndex] = requestBuffer.mappedWords[1];
     if (requestCount == 0u) {
         return;
     }
@@ -238,8 +256,13 @@ void BrickResidencyManager::processBrickRequests(
         }
         uint32_t gpuBrickSlot = cpuBrickToGpuBrick[cpuBrickIndex];
         if (gpuBrickSlot == INVALID_GPU_BRICK_SLOT) {
-            ensureGpuBrickCapacity(instance, commandPool, brickPoolBuffer, nextGpuBrickSlot + 1u, renderer);
-            gpuBrickSlot = nextGpuBrickSlot++;
+            if (!freeGpuBrickSlots.empty()) {
+                gpuBrickSlot = freeGpuBrickSlots.back();
+                freeGpuBrickSlots.pop_back();
+            } else {
+                ensureGpuBrickCapacity(instance, commandPool, brickPoolBuffer, nextGpuBrickSlot + 1u, renderer);
+                gpuBrickSlot = nextGpuBrickSlot++;
+            }
             cpuBrickToGpuBrick[cpuBrickIndex] = gpuBrickSlot;
             gpuBrickToCpuBrick[gpuBrickSlot] = cpuBrickIndex;
 
@@ -270,8 +293,8 @@ void BrickResidencyManager::processBrickRequests(
         const size_t patchWordOffset = chunkPatchWords.size();
         chunkPatchWords.push_back(gpuBrickSlot);
         chunkPatchWords.push_back(metadataWord);
-        gpuSlotByChunkEntry[entryIndex] = gpuBrickSlot;
-        setRequestedBit(requestedChunkEntryBits, entryIndex, false);
+        gpuSlotByChunkEntry[lodIndex][entryIndex] = gpuBrickSlot;
+        setRequestedBit(requestedChunkEntryBits[lodIndex], entryIndex, false);
         chunkPatchRegions.push_back({
             sizeof(uint32_t) * static_cast<VkDeviceSize>(patchWordOffset),
             sizeof(uint32_t) * static_cast<VkDeviceSize>(packedEntryIndex),

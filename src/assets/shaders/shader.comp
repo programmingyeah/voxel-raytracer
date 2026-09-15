@@ -40,10 +40,6 @@ layout(std430, binding = 7) buffer Lod1ChunkBrickMaps {
     uint data[];
 } lod1ChunkBrickMaps;
 
-layout(std430, binding = 8) readonly buffer Lod1BrickPool {
-    uint data[];
-} lod1BrickPool;
-
 layout(std430, binding = 9) buffer Lod1BrickRequests {
     uint data[];
 } lod1BrickRequests;
@@ -55,10 +51,6 @@ layout(std430, binding = 10) readonly buffer Lod2ChunkWindowIndices {
 layout(std430, binding = 11) buffer Lod2ChunkBrickMaps {
     uint data[];
 } lod2ChunkBrickMaps;
-
-layout(std430, binding = 12) readonly buffer Lod2BrickPool {
-    uint data[];
-} lod2BrickPool;
 
 layout(std430, binding = 13) buffer Lod2BrickRequests {
     uint data[];
@@ -72,10 +64,6 @@ layout(std430, binding = 15) buffer Lod3ChunkBrickMaps {
     uint data[];
 } lod3ChunkBrickMaps;
 
-layout(std430, binding = 16) readonly buffer Lod3BrickPool {
-    uint data[];
-} lod3BrickPool;
-
 layout(std430, binding = 17) buffer Lod3BrickRequests {
     uint data[];
 } lod3BrickRequests;
@@ -87,10 +75,6 @@ layout(std430, binding = 18) readonly buffer Lod4ChunkWindowIndices {
 layout(std430, binding = 19) buffer Lod4ChunkBrickMaps {
     uint data[];
 } lod4ChunkBrickMaps;
-
-layout(std430, binding = 20) readonly buffer Lod4BrickPool {
-    uint data[];
-} lod4BrickPool;
 
 layout(std430, binding = 21) buffer Lod4BrickRequests {
     uint data[];
@@ -104,10 +88,6 @@ layout(std430, binding = 23) buffer Lod5ChunkBrickMaps {
     uint data[];
 } lod5ChunkBrickMaps;
 
-layout(std430, binding = 24) readonly buffer Lod5BrickPool {
-    uint data[];
-} lod5BrickPool;
-
 layout(std430, binding = 25) buffer Lod5BrickRequests {
     uint data[];
 } lod5BrickRequests;
@@ -120,10 +100,6 @@ layout(std430, binding = 27) buffer Lod6ChunkBrickMaps {
     uint data[];
 } lod6ChunkBrickMaps;
 
-layout(std430, binding = 28) readonly buffer Lod6BrickPool {
-    uint data[];
-} lod6BrickPool;
-
 layout(std430, binding = 29) buffer Lod6BrickRequests {
     uint data[];
 } lod6BrickRequests;
@@ -135,10 +111,6 @@ layout(std430, binding = 30) readonly buffer Lod7ChunkWindowIndices {
 layout(std430, binding = 31) buffer Lod7ChunkBrickMaps {
     uint data[];
 } lod7ChunkBrickMaps;
-
-layout(std430, binding = 32) readonly buffer Lod7BrickPool {
-    uint data[];
-} lod7BrickPool;
 
 layout(std430, binding = 33) buffer Lod7BrickRequests {
     uint data[];
@@ -174,6 +146,7 @@ const uint BRICK_METADATA_MATERIAL_MASK = 0xFFu;
 const uint BRICK_METADATA_RESIDENT_BIT = 1u << 8u;
 const uint BRICK_METADATA_REQUESTED_BIT = 1u << 9u;
 const uint CHUNK_ACCEL_EMPTY_FLAG = 1u << 0u;
+const uint CHUNK_ACCEL_MISSING_FLAG = 1u << 1u;
 const uint CHUNK_ACCEL_8_WORD_COUNT = 16u;
 const uint CHUNK_ACCEL_4_WORD_COUNT = 2u;
 const uint CHUNK_ACCEL_2_WORD_COUNT = 1u;
@@ -206,6 +179,8 @@ struct TraceResult {
     bool hit;
     bool requestedFallback;
     bool intersectsCoverage;
+    bool startedInsideCoverage;
+    bool exitedThroughTop;
     float coverageStartT;
     float coverageEndT;
     float hitT;
@@ -430,14 +405,7 @@ uint loadChunkBrickMapWord(LodTraceContext ctx, uint index) {
 }
 
 uint loadBrickPoolWord(LodTraceContext ctx, uint index) {
-    if (ctx.lodIndex == 0) return brickPool.data[index];
-    if (ctx.lodIndex == 1) return lod1BrickPool.data[index];
-    if (ctx.lodIndex == 2) return lod2BrickPool.data[index];
-    if (ctx.lodIndex == 3) return lod3BrickPool.data[index];
-    if (ctx.lodIndex == 4) return lod4BrickPool.data[index];
-    if (ctx.lodIndex == 5) return lod5BrickPool.data[index];
-    if (ctx.lodIndex == 6) return lod6BrickPool.data[index];
-    return lod7BrickPool.data[index];
+    return brickPool.data[index];
 }
 
 uint loadBrickRequestWord(LodTraceContext ctx, uint index) {
@@ -502,6 +470,10 @@ uint chunkRecordBase(LodTraceContext ctx, ivec3 chunkCoord) {
 
 bool chunkIsEmpty(LodTraceContext ctx, uint chunkRecordBase) {
     return (loadChunkBrickMapWord(ctx, chunkRecordBase) & CHUNK_ACCEL_EMPTY_FLAG) != 0u;
+}
+
+bool chunkIsMissing(LodTraceContext ctx, uint chunkRecordBase) {
+    return (loadChunkBrickMapWord(ctx, chunkRecordBase) & CHUNK_ACCEL_MISSING_FLAG) != 0u;
 }
 
 bool loadChunkAccelOccupancy(LodTraceContext ctx, uint chunkRecordBase, uint wordOffset, int cellsPerAxis, ivec3 cellCoord) {
@@ -988,6 +960,9 @@ bool traceChunk(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 chunkCoord, float s
     uint chunkRecordBase = chunkRecordBase(ctx, chunkCoord);
     ivec3 chunkWorldMinPos = chunkCoord * ctx.chunkWorldSpan;
     if (chunkIsEmpty(ctx, chunkRecordBase)) {
+        if (!chunkIsMissing(ctx, chunkRecordBase)) {
+            return false;
+        }
         if (traceParentLodChunkFallback(ctx, ro, rd, chunkWorldMinPos, startT, endT, entryNormal, counters, hitT, hitNormal, hitMaterialId)) {
             requestedFallback = true;
             return true;
@@ -1021,6 +996,8 @@ TraceResult traceSceneForLodInterval(LodTraceContext ctx, vec3 ro, vec3 rd, floa
     result.hit = false;
     result.requestedFallback = false;
     result.intersectsCoverage = false;
+    result.startedInsideCoverage = false;
+    result.exitedThroughTop = false;
     result.coverageStartT = BIG;
     result.coverageEndT = -BIG;
     result.hitT = 0.0;
@@ -1036,6 +1013,7 @@ TraceResult traceSceneForLodInterval(LodTraceContext ctx, vec3 ro, vec3 rd, floa
 
     float startT = max(max(worldEntryT, 0.0), minTraceT);
     float endT = min(worldExitT, maxTraceT);
+    result.startedInsideCoverage = worldEntryT < 0.0 && minTraceT <= 0.0;
     if (endT <= startT + EPS) {
         return result;
     }
@@ -1043,6 +1021,7 @@ TraceResult traceSceneForLodInterval(LodTraceContext ctx, vec3 ro, vec3 rd, floa
     result.intersectsCoverage = true;
     result.coverageStartT = startT;
     result.coverageEndT = endT;
+    result.exitedThroughTop = rd.y > 0.0 && abs(endT - worldExitT) <= EPS && worldExitT <= maxTraceT + EPS && worldEntryNormal.y <= 0.0;
 
     vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
@@ -1108,6 +1087,8 @@ TraceResult traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounte
     finalResult.hit = false;
     finalResult.requestedFallback = false;
     finalResult.intersectsCoverage = false;
+    finalResult.startedInsideCoverage = false;
+    finalResult.exitedThroughTop = false;
     finalResult.coverageStartT = BIG;
     finalResult.coverageEndT = -BIG;
     finalResult.hitT = BIG;
@@ -1119,6 +1100,8 @@ TraceResult traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounte
     for (int lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
         TraceResult result = traceSceneForLodInterval(makeLodTraceContext(lodIndex), ro, rd, currentMinTraceT, maxDistance, counters);
         finalResult.intersectsCoverage = finalResult.intersectsCoverage || result.intersectsCoverage;
+        finalResult.startedInsideCoverage = finalResult.startedInsideCoverage || result.startedInsideCoverage;
+        finalResult.exitedThroughTop = finalResult.exitedThroughTop || result.exitedThroughTop;
         finalResult.requestedFallback = finalResult.requestedFallback || result.requestedFallback;
         finalResult.coverageStartT = min(finalResult.coverageStartT, result.coverageStartT);
         finalResult.coverageEndT = max(finalResult.coverageEndT, result.coverageEndT);
@@ -1129,6 +1112,10 @@ TraceResult traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounte
 
         if (!result.intersectsCoverage) {
             continue;
+        }
+
+        if (!result.hit && !result.requestedFallback && result.startedInsideCoverage && result.exitedThroughTop) {
+            return finalResult;
         }
 
         currentMinTraceT = max(currentMinTraceT, result.coverageEndT);

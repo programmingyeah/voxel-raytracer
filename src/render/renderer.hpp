@@ -37,8 +37,6 @@ private:
     struct GpuLodResources {
         Buffer chunkWindowIndexBuffer{};
         Buffer chunkBrickMapBuffer{};
-        Buffer brickPoolBuffer{};
-        BrickResidencyManager brickResidency{};
     };
 
     VoxelWorld* world = nullptr;
@@ -52,6 +50,8 @@ private:
     std::vector<VkImageView> swapchainImageViews;
     std::vector<VkFramebuffer> imguiFramebuffers;
     std::array<GpuLodResources, WORLD_LOD_COUNT> gpuLods{};
+    BrickResidencyManager brickResidency{};
+    Buffer sharedBrickPoolBuffer{};
     Buffer worldMetadataBuffer{};
     std::vector<VulkanAppFrameUploads> frameUploads;
     SyncManager syncManager;
@@ -83,7 +83,7 @@ private:
     void syncWorldForLod(WorldLod lod);
     void processBrickRequests(size_t frameIndex);
     void processBrickRequestsForLod(size_t frameIndex, WorldLod lod);
-    void ensureGpuBrickCapacity(WorldLod lod, uint32_t requiredCapacity);
+    void ensureGpuBrickCapacity(uint32_t requiredCapacity);
     void queueBufferUpload(VulkanAppFrameUploads& uploads, Buffer& destinationBuffer, const std::vector<uint32_t>& data, const std::vector<BufferCopyRegion>& regions);
     void resetRequestBuffer(size_t frameIndex);
     void resetRequestBufferForLod(size_t frameIndex, WorldLod lod);
