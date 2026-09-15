@@ -170,7 +170,11 @@ void VulkanApp::recordUploads(VkCommandBuffer commandBuffer) {
     bufferBarriers.reserve(uploads.pending.size());
 
     for (const auto& upload : uploads.pending) {
-        recordBufferCopies(commandBuffer, upload.stagingBuffer.buffer, upload.destinationBuffer, upload.regions);
+        if (upload.destinationBuffer == nullptr || upload.destinationBuffer->buffer == VK_NULL_HANDLE) {
+            continue;
+        }
+
+        recordBufferCopies(commandBuffer, upload.stagingBuffer.buffer, upload.destinationBuffer->buffer, upload.regions);
 
         VkBufferMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -178,7 +182,7 @@ void VulkanApp::recordUploads(VkCommandBuffer commandBuffer) {
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = upload.destinationBuffer;
+        barrier.buffer = upload.destinationBuffer->buffer;
         barrier.offset = 0;
         barrier.size = VK_WHOLE_SIZE;
         bufferBarriers.push_back(barrier);
@@ -210,7 +214,7 @@ void VulkanApp::queueBufferUpload(VulkanAppFrameUploads& uploads, Buffer& destin
     }
 
     VulkanAppBufferUpload upload{};
-    upload.destinationBuffer = destinationBuffer.buffer;
+    upload.destinationBuffer = &destinationBuffer;
     upload.regions = regions;
     upload.stagingBuffer.createBuffer(
         &instance,

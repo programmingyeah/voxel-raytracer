@@ -40,7 +40,7 @@ struct GpuWorldMetadata {
 
 struct VulkanAppBufferUpload {
     Buffer stagingBuffer{};
-    VkBuffer destinationBuffer = VK_NULL_HANDLE;
+    Buffer* destinationBuffer = nullptr;
     std::vector<BufferCopyRegion> regions;
 };
 

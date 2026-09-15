@@ -4,9 +4,16 @@
 
 #include "imgui.h"
 
+#include <string>
+
 namespace {
-constexpr uint32_t BASE_RENDER_DISTANCE_CHUNKS = 5u;
-constexpr uint32_t WORLD_HEIGHT_CHUNKS = 5u;
+std::string formatWithCommas(uint64_t value) {
+    std::string digits = std::to_string(value);
+    for (std::ptrdiff_t i = static_cast<std::ptrdiff_t>(digits.size()) - 3; i > 0; i -= 3) {
+        digits.insert(static_cast<size_t>(i), ",");
+    }
+    return digits;
+}
 }
 
 void VulkanApp::updateFrameTiming() {
@@ -24,9 +31,16 @@ void VulkanApp::updateFrameTiming() {
 void VulkanApp::drawStatsUi() {
     const size_t chunkCount = world != nullptr ? world->getChunkCount() : 0;
     const size_t generatedChunkCount = world != nullptr ? world->getGeneratedChunkCount() : 0;
+    const glm::uvec3 lod0ChunkCounts = world != nullptr ? world->getChunkCounts(WorldLod::Lod0) : glm::uvec3(0u);
+    const glm::uvec3 coarsestVoxelDimensions = world != nullptr ? world->getVoxelDimensions(static_cast<WorldLod>(WORLD_LOD_COUNT - 1u)) : glm::uvec3(0u);
     const uint64_t worldVoxelCount = static_cast<uint64_t>(chunkCount) * Chunk::VOXEL_COUNT;
+    const uint64_t effectiveVoxelCount = static_cast<uint64_t>(coarsestVoxelDimensions.x) * static_cast<uint64_t>(coarsestVoxelDimensions.y) * static_cast<uint64_t>(coarsestVoxelDimensions.z);
     const size_t allocatedBrickCount = world != nullptr ? world->getAllocatedBrickCount() : 0;
     const size_t brickCapacity = world != nullptr ? world->getBrickCapacity() : 0;
+    const uint32_t renderDistanceChunks = lod0ChunkCounts.x > 0u ? (lod0ChunkCounts.x - 1u) / 2u : 0u;
+    const uint32_t worldHeightChunks = lod0ChunkCounts.y;
+    const uint32_t effectiveRenderDistanceChunks = renderDistanceChunks * (1u << (WORLD_LOD_COUNT - 1u));
+    const uint32_t effectiveRenderDistanceWorldUnits = effectiveRenderDistanceChunks * Chunk::SIZE;
     static const char* rayQueryVisualizationModes[] = {"Off", "Query heat", "Hierarchy breakdown"};
     const bool combinedSelected = lodRenderMode >= static_cast<int>(WORLD_LOD_COUNT);
 
@@ -52,17 +66,18 @@ void VulkanApp::drawStatsUi() {
     }
 
     ImGui::Separator();
-    ImGui::Text("Render distance: %u chunks", BASE_RENDER_DISTANCE_CHUNKS);
-    ImGui::Text("Effective render distance: %u chunks", BASE_RENDER_DISTANCE_CHUNKS << (WORLD_LOD_COUNT - 1u));
-    ImGui::Text("Effective render distance: %u world units", BASE_RENDER_DISTANCE_CHUNKS * Chunk::SIZE * (1u << (WORLD_LOD_COUNT - 1u)));
+    ImGui::Text("Render distance: %u chunks", renderDistanceChunks);
+    ImGui::Text("Effective render distance: %u chunks", effectiveRenderDistanceChunks);
+    ImGui::Text("Effective render distance: %u world units", effectiveRenderDistanceWorldUnits);
 
     ImGui::Separator();
     ImGui::Text("World summary");
     ImGui::Text("LOD0 generated chunks: %zu / %zu", generatedChunkCount, chunkCount);
-    ImGui::Text("Voxel count: %llu", static_cast<unsigned long long>(worldVoxelCount));
-    ImGui::Text("Solid voxels: %llu", static_cast<unsigned long long>(worldStats.solidVoxelCount));
-    ImGui::Text("Allocated bricks: %zu / %zu", allocatedBrickCount, brickCapacity);
-    ImGui::Text("World height: %u chunks", WORLD_HEIGHT_CHUNKS);
+    ImGui::Text("Voxel count: %s", formatWithCommas(worldVoxelCount).c_str());
+    ImGui::Text("Effective voxel count: %s", formatWithCommas(effectiveVoxelCount).c_str());
+    ImGui::Text("Solid voxels: %s", formatWithCommas(worldStats.solidVoxelCount).c_str());
+    ImGui::Text("Allocated bricks: %s / %s", formatWithCommas(static_cast<uint64_t>(allocatedBrickCount)).c_str(), formatWithCommas(static_cast<uint64_t>(brickCapacity)).c_str());
+    ImGui::Text("World height: %u chunks", worldHeightChunks);
     ImGui::Text("Avg chunk load: %.3f ms", worldStats.averageChunkGenerationMs);
     ImGui::Text("World gen total: %.2f ms", worldStats.totalGenerationMs);
 

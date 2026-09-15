@@ -6,7 +6,7 @@
 
 namespace {
 //settings
-constexpr uint32_t RENDER_DISTANCE = 2;
+constexpr uint32_t RENDER_DISTANCE = 5;
 constexpr uint32_t WORLD_HEIGHT_CHUNKS = 5u;
 
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
