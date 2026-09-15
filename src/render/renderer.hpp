@@ -13,6 +13,7 @@
 #include "../world/world_gen.hpp"
 #include "../camera.hpp"
 #include <chrono>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -33,6 +34,13 @@ public:
 private:
     friend class BrickResidencyManager;
 
+    struct GpuLodResources {
+        Buffer chunkWindowIndexBuffer{};
+        Buffer chunkBrickMapBuffer{};
+        Buffer brickPoolBuffer{};
+        BrickResidencyManager brickResidency{};
+    };
+
     VoxelWorld* world = nullptr;
     WorldGenerationStats worldStats{};
     GLFWwindow* window = nullptr;
@@ -43,10 +51,8 @@ private:
     std::vector<bool> computeImagesInitialized;
     std::vector<VkImageView> swapchainImageViews;
     std::vector<VkFramebuffer> imguiFramebuffers;
-    Buffer chunkWindowIndexBuffer{};
-    Buffer chunkBrickMapBuffer{};
-    Buffer brickPoolBuffer{};
-    BrickResidencyManager brickResidency;
+    std::array<GpuLodResources, WORLD_LOD_COUNT> gpuLods{};
+    Buffer worldMetadataBuffer{};
     std::vector<VulkanAppFrameUploads> frameUploads;
     SyncManager syncManager;
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
@@ -63,6 +69,7 @@ private:
     float frameTimeMs = 0.0f;
     int rayQueryVisualizationMode = 0;
     float rayQueryVisualizationIntensity = 1.0f;
+    int lodRenderMode = static_cast<int>(WORLD_LOD_COUNT);
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 
@@ -70,11 +77,16 @@ private:
     void initVulkan();
     void createComputeImages();
     void createWorldBuffers();
+    void createWorldBuffersForLod(WorldLod lod);
+    void syncWorldMetadata();
     void syncWorld();
+    void syncWorldForLod(WorldLod lod);
     void processBrickRequests(size_t frameIndex);
-    void ensureGpuBrickCapacity(uint32_t requiredCapacity);
+    void processBrickRequestsForLod(size_t frameIndex, WorldLod lod);
+    void ensureGpuBrickCapacity(WorldLod lod, uint32_t requiredCapacity);
     void queueBufferUpload(VulkanAppFrameUploads& uploads, Buffer& destinationBuffer, const std::vector<uint32_t>& data, const std::vector<BufferCopyRegion>& regions);
     void resetRequestBuffer(size_t frameIndex);
+    void resetRequestBufferForLod(size_t frameIndex, WorldLod lod);
     void recordUploads(VkCommandBuffer commandBuffer);
     void cleanupUploads(size_t frameIndex);
     void createDescriptorSets(bool allocateSets);

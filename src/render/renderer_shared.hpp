@@ -1,8 +1,10 @@
 #pragma once
 
 #include "buffer.hpp"
+#include "../world/voxel_world.hpp"
 #include "../world/world_upload.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -21,10 +23,19 @@ struct ComputePushConstants {
     glm::vec4 cameraForward;
     glm::vec4 cameraRight;
     glm::vec4 cameraUp;
-    glm::ivec4 worldMin;
-    glm::ivec4 worldMax;
-    glm::ivec4 chunkWindowDimensions;
-    glm::vec4 renderParams;
+    glm::vec4 visualizationParams;
+    glm::ivec4 renderModeParams;
+};
+
+struct GpuLodMetadata {
+    glm::ivec4 worldMin{0};
+    glm::ivec4 worldMax{0};
+    glm::ivec4 chunkWindowDimensions{0};
+    glm::ivec4 traversalInfo{0};
+};
+
+struct GpuWorldMetadata {
+    std::array<GpuLodMetadata, WORLD_LOD_COUNT> lods{};
 };
 
 struct VulkanAppBufferUpload {

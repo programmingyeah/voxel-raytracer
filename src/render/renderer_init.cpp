@@ -49,36 +49,39 @@ void VulkanApp::initVulkan() {
     storageImageBinding.descriptorCount = 1;
     storageImageBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    VkDescriptorSetLayoutBinding chunkWindowIndexBinding{};
-    chunkWindowIndexBinding.binding = 1;
-    chunkWindowIndexBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    chunkWindowIndexBinding.descriptorCount = 1;
-    chunkWindowIndexBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    bindings.push_back(storageImageBinding);
 
-    VkDescriptorSetLayoutBinding chunkBrickMapBinding{};
-    chunkBrickMapBinding.binding = 2;
-    chunkBrickMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    chunkBrickMapBinding.descriptorCount = 1;
-    chunkBrickMapBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutBinding metadataBinding{};
+    metadataBinding.binding = 1;
+    metadataBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    metadataBinding.descriptorCount = 1;
+    metadataBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings.push_back(metadataBinding);
 
-    VkDescriptorSetLayoutBinding brickPoolBinding{};
-    brickPoolBinding.binding = 3;
-    brickPoolBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    brickPoolBinding.descriptorCount = 1;
-    brickPoolBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        const uint32_t bindingBase = 2u + static_cast<uint32_t>(lodIndex) * 4u;
+        for (uint32_t bindingOffset = 0; bindingOffset < 4u; bindingOffset++) {
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = bindingBase + bindingOffset;
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            binding.descriptorCount = 1;
+            binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings.push_back(binding);
+        }
+    }
 
-    VkDescriptorSetLayoutBinding brickRequestBinding{};
-    brickRequestBinding.binding = 4;
-    brickRequestBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    brickRequestBinding.descriptorCount = 1;
-    brickRequestBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    descriptorManager.initLayout(
+        &instance,
+        bindings
+    );
+    constexpr uint32_t computeStorageBufferDescriptorsPerSet = 1u + static_cast<uint32_t>(WORLD_LOD_COUNT) * 4u;
 
-    descriptorManager.initLayout(&instance, {storageImageBinding, chunkWindowIndexBinding, chunkBrickMapBinding, brickPoolBinding, brickRequestBinding});
     descriptorManager.initPool(
         &instance,
         {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_FRAMES_IN_FLIGHT},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * MAX_FRAMES_IN_FLIGHT}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, computeStorageBufferDescriptorsPerSet * MAX_FRAMES_IN_FLIGHT}
         },
         MAX_FRAMES_IN_FLIGHT
     );

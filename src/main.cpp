@@ -6,7 +6,7 @@
 
 namespace {
 //settings
-constexpr uint32_t RENDER_DISTANCE = 5;
+constexpr uint32_t RENDER_DISTANCE = 2;
 constexpr uint32_t WORLD_HEIGHT_CHUNKS = 3u;
 
 constexpr float PLACE_VOXEL_RANGE = 16.0f;
@@ -18,14 +18,6 @@ glm::uvec3 worldChunkCounts() {
         2u * RENDER_DISTANCE + 1u,
         WORLD_HEIGHT_CHUNKS,
         2u * RENDER_DISTANCE + 1u
-    );
-}
-
-glm::ivec2 chunkXZFromPosition(const glm::vec3& position) {
-    const glm::vec3 chunkPosition = glm::floor(position / static_cast<float>(Chunk::SIZE));
-    return glm::ivec2(
-        static_cast<int32_t>(chunkPosition.x),
-        static_cast<int32_t>(chunkPosition.z)
     );
 }
 
@@ -91,16 +83,20 @@ void gameLoop(VoxelWorld& world, WorldGenerator& worldGenerator, Camera& camera)
         glfwPollEvents();
         camera.update(window, deltaTimeSeconds);
 
-        const glm::ivec2 focusChunkXZ = chunkXZFromPosition(camera.getPosition());
-        world.centerChunkWindow(focusChunkXZ);
-        worldGenerator.requestNextChunk(world, focusChunkXZ, camera.getForward());
+        for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+            const WorldLod lod = static_cast<WorldLod>(lodIndex);
+            world.centerChunkWindow(lod, world.chunkXZFromWorldPosition(lod, camera.getPosition()));
+        }
+        worldGenerator.requestNextChunk(world, camera.getPosition(), camera.getForward());
         while (true) {
             const std::optional<WorldGenerationStats> generationStats = worldGenerator.consumeCompletedGeneration();
             if (!generationStats.has_value()) {
                 break;
             }
 
-            renderer.setWorldStats(*generationStats);
+            if (generationStats->lod == WorldLod::Lod0) {
+                renderer.setWorldStats(*generationStats);
+            }
         }
 
         const bool rightMousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
@@ -121,7 +117,10 @@ int main() {
         VoxelWorld world(worldChunkCounts());
         WorldGenerator worldGenerator;
         Camera camera(glm::vec3(320.0f, 160.0f, 256.0f));
-        world.centerChunkWindow(chunkXZFromPosition(camera.getPosition()));
+        for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+            const WorldLod lod = static_cast<WorldLod>(lodIndex);
+            world.centerChunkWindow(lod, world.chunkXZFromWorldPosition(lod, camera.getPosition()));
+        }
         const WorldGenerationStats worldStats{};
 
         window = renderer.init(world, worldStats);

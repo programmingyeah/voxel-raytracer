@@ -40,22 +40,26 @@ size_t coarseSampleIndex(uint32_t sampleX, uint32_t sampleZ, uint32_t sampleCoun
 }
 
 void sampleChunkColumnHeights(
+    const VoxelWorld& world,
+    WorldLod lod,
     std::vector<uint32_t>& columnHeights,
     glm::ivec3 chunkCoordinate,
-    const glm::uvec3& voxelDimensions
+    uint32_t terrainWorldHeight
 ) {
     const uint32_t sampleCountPerAxis = coarseSampleCountPerAxis();
     std::vector<float> coarseHeights(static_cast<size_t>(sampleCountPerAxis) * sampleCountPerAxis);
+    const glm::ivec3 chunkWorldMin = world.getChunkWorldMin(lod, chunkCoordinate);
+    const int32_t cellWorldStep = static_cast<int32_t>(world.getLocalCellWorldStep(lod));
 
     for (uint32_t sampleZ = 0; sampleZ < sampleCountPerAxis; sampleZ++) {
         const uint32_t localZ = coarseSampleLocalCoordinate(sampleZ);
-        const int32_t worldZ = chunkCoordinate.z * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localZ);
+        const int32_t worldZ = chunkWorldMin.z + static_cast<int32_t>(localZ) * cellWorldStep;
 
         for (uint32_t sampleX = 0; sampleX < sampleCountPerAxis; sampleX++) {
             const uint32_t localX = coarseSampleLocalCoordinate(sampleX);
-            const int32_t worldX = chunkCoordinate.x * static_cast<int32_t>(Chunk::SIZE) + static_cast<int32_t>(localX);
+            const int32_t worldX = chunkWorldMin.x + static_cast<int32_t>(localX) * cellWorldStep;
             coarseHeights[coarseSampleIndex(sampleX, sampleZ, sampleCountPerAxis)] = sampleTerrainHeight(
-                glm::vec2(static_cast<float>(worldX), static_cast<float>(worldZ)), voxelDimensions
+                glm::vec2(static_cast<float>(worldX), static_cast<float>(worldZ)), terrainWorldHeight
             );
         }
     }
@@ -112,6 +116,8 @@ BrickClassification classifyBrick(
 }
 
 uint64_t buildMixedBrick(
+    const VoxelWorld& world,
+    WorldLod lod,
     Brick& brick,
     const std::vector<uint32_t>& columnHeights,
     uint32_t brickBaseLocalX,
@@ -119,13 +125,14 @@ uint64_t buildMixedBrick(
     uint32_t brickMinWorldY
 ) {
     uint64_t solidVoxelCount = 0;
+    const uint32_t cellWorldStep = world.getLocalCellWorldStep(lod);
 
     for (uint32_t localZ = 0; localZ < BRICK_SIZE; localZ++) {
         for (uint32_t localX = 0; localX < BRICK_SIZE; localX++) {
             const uint32_t maxSolidWorldY = columnHeights[columnIndex(brickBaseLocalX + localX, brickBaseLocalZ + localZ)];
 
             for (uint32_t localY = 0; localY < BRICK_SIZE; localY++) {
-                const uint32_t worldY = brickMinWorldY + localY;
+                const uint32_t worldY = brickMinWorldY + localY * cellWorldStep;
                 const uint8_t voxelValue = worldY <= maxSolidWorldY ? BRICK_SOLID_VOXEL : BRICK_EMPTY_VOXEL;
                 brick.voxels[localX][localY][localZ] = voxelValue;
                 solidVoxelCount += voxelValue != BRICK_EMPTY_VOXEL;
@@ -138,8 +145,8 @@ uint64_t buildMixedBrick(
 }
 }
 
-void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions, TerrainBuildResult& outResult) {
-    Chunk& chunk = world.slots.at(chunkSlotIndex).chunk;
+void buildTerrainChunk(VoxelWorld& world, WorldLod lod, uint32_t chunkSlotIndex, uint32_t terrainWorldHeight, TerrainBuildResult& outResult) {
+    Chunk& chunk = world.getChunkByMutableSlotIndex(lod, chunkSlotIndex);
     Chunk::EncodedBrickMap& brickMap = chunk.accessBrickMapForGeneration();
     std::vector<uint32_t> columnHeights(static_cast<size_t>(Chunk::SIZE) * Chunk::SIZE);
 
@@ -149,16 +156,17 @@ void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uv
     chunk.resetBrickMapToAirNoCallbacks();
 
     const glm::ivec3 chunkCoordinate = chunk.getChunkCoordinate();
-    sampleChunkColumnHeights(columnHeights, chunkCoordinate, voxelDimensions);
+    sampleChunkColumnHeights(world, lod, columnHeights, chunkCoordinate, terrainWorldHeight);
 
-    const uint32_t chunkBaseWorldY = static_cast<uint32_t>(chunkCoordinate.y) * Chunk::SIZE;
+    const uint32_t chunkBaseWorldY = static_cast<uint32_t>(world.getChunkWorldMin(lod, chunkCoordinate).y);
+    const uint32_t cellWorldStep = world.getLocalCellWorldStep(lod);
     for (uint32_t brickZ = 0; brickZ < Chunk::BRICKS_PER_AXIS; brickZ++) {
         const uint32_t brickBaseLocalZ = brickZ * BRICK_SIZE;
 
         for (uint32_t brickY = 0; brickY < Chunk::BRICKS_PER_AXIS; brickY++) {
             const uint32_t brickBaseLocalY = brickY * BRICK_SIZE;
-            const uint32_t brickMinWorldY = chunkBaseWorldY + brickBaseLocalY;
-            const uint32_t brickMaxWorldY = brickMinWorldY + BRICK_SIZE - 1u;
+            const uint32_t brickMinWorldY = chunkBaseWorldY + brickBaseLocalY * cellWorldStep;
+            const uint32_t brickMaxWorldY = brickMinWorldY + BRICK_SIZE * cellWorldStep - 1u;
 
             for (uint32_t brickX = 0; brickX < Chunk::BRICKS_PER_AXIS; brickX++) {
                 const uint32_t brickBaseLocalX = brickX * BRICK_SIZE;
@@ -184,6 +192,8 @@ void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uv
 
                 Brick brick{};
                 outResult.solidVoxelCount += buildMixedBrick(
+                    world,
+                    lod,
                     brick,
                     columnHeights,
                     brickBaseLocalX,

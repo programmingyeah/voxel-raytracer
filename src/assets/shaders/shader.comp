@@ -1,33 +1,156 @@
 #version 450
 
+#define WORLD_LOD_COUNT 8
+
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(binding = 0, rgba8) uniform writeonly image2D destImage;
 
-layout(std430, binding = 1) readonly buffer ChunkWindowIndices {
+struct GpuLodMetadata {
+    ivec4 worldMin;
+    ivec4 worldMax;
+    ivec4 chunkWindowDimensions;
+    ivec4 traversalInfo;
+};
+
+layout(std430, binding = 1) readonly buffer WorldMetadata {
+    GpuLodMetadata lods[WORLD_LOD_COUNT];
+} worldMetadata;
+
+layout(std430, binding = 2) readonly buffer ChunkWindowIndices {
     uint data[];
 } chunkWindowIndices;
 
-layout(std430, binding = 2) buffer ChunkBrickMaps {
+layout(std430, binding = 3) buffer ChunkBrickMaps {
     uint data[];
 } chunkBrickMaps;
 
-layout(std430, binding = 3) readonly buffer BrickPool {
+layout(std430, binding = 4) readonly buffer BrickPool {
     uint data[];
 } brickPool;
 
-layout(std430, binding = 4) buffer BrickRequests {
+layout(std430, binding = 5) buffer BrickRequests {
     uint data[];
 } brickRequests;
+
+layout(std430, binding = 6) readonly buffer Lod1ChunkWindowIndices {
+    uint data[];
+} lod1ChunkWindowIndices;
+
+layout(std430, binding = 7) buffer Lod1ChunkBrickMaps {
+    uint data[];
+} lod1ChunkBrickMaps;
+
+layout(std430, binding = 8) readonly buffer Lod1BrickPool {
+    uint data[];
+} lod1BrickPool;
+
+layout(std430, binding = 9) buffer Lod1BrickRequests {
+    uint data[];
+} lod1BrickRequests;
+
+layout(std430, binding = 10) readonly buffer Lod2ChunkWindowIndices {
+    uint data[];
+} lod2ChunkWindowIndices;
+
+layout(std430, binding = 11) buffer Lod2ChunkBrickMaps {
+    uint data[];
+} lod2ChunkBrickMaps;
+
+layout(std430, binding = 12) readonly buffer Lod2BrickPool {
+    uint data[];
+} lod2BrickPool;
+
+layout(std430, binding = 13) buffer Lod2BrickRequests {
+    uint data[];
+} lod2BrickRequests;
+
+layout(std430, binding = 14) readonly buffer Lod3ChunkWindowIndices {
+    uint data[];
+} lod3ChunkWindowIndices;
+
+layout(std430, binding = 15) buffer Lod3ChunkBrickMaps {
+    uint data[];
+} lod3ChunkBrickMaps;
+
+layout(std430, binding = 16) readonly buffer Lod3BrickPool {
+    uint data[];
+} lod3BrickPool;
+
+layout(std430, binding = 17) buffer Lod3BrickRequests {
+    uint data[];
+} lod3BrickRequests;
+
+layout(std430, binding = 18) readonly buffer Lod4ChunkWindowIndices {
+    uint data[];
+} lod4ChunkWindowIndices;
+
+layout(std430, binding = 19) buffer Lod4ChunkBrickMaps {
+    uint data[];
+} lod4ChunkBrickMaps;
+
+layout(std430, binding = 20) readonly buffer Lod4BrickPool {
+    uint data[];
+} lod4BrickPool;
+
+layout(std430, binding = 21) buffer Lod4BrickRequests {
+    uint data[];
+} lod4BrickRequests;
+
+layout(std430, binding = 22) readonly buffer Lod5ChunkWindowIndices {
+    uint data[];
+} lod5ChunkWindowIndices;
+
+layout(std430, binding = 23) buffer Lod5ChunkBrickMaps {
+    uint data[];
+} lod5ChunkBrickMaps;
+
+layout(std430, binding = 24) readonly buffer Lod5BrickPool {
+    uint data[];
+} lod5BrickPool;
+
+layout(std430, binding = 25) buffer Lod5BrickRequests {
+    uint data[];
+} lod5BrickRequests;
+
+layout(std430, binding = 26) readonly buffer Lod6ChunkWindowIndices {
+    uint data[];
+} lod6ChunkWindowIndices;
+
+layout(std430, binding = 27) buffer Lod6ChunkBrickMaps {
+    uint data[];
+} lod6ChunkBrickMaps;
+
+layout(std430, binding = 28) readonly buffer Lod6BrickPool {
+    uint data[];
+} lod6BrickPool;
+
+layout(std430, binding = 29) buffer Lod6BrickRequests {
+    uint data[];
+} lod6BrickRequests;
+
+layout(std430, binding = 30) readonly buffer Lod7ChunkWindowIndices {
+    uint data[];
+} lod7ChunkWindowIndices;
+
+layout(std430, binding = 31) buffer Lod7ChunkBrickMaps {
+    uint data[];
+} lod7ChunkBrickMaps;
+
+layout(std430, binding = 32) readonly buffer Lod7BrickPool {
+    uint data[];
+} lod7BrickPool;
+
+layout(std430, binding = 33) buffer Lod7BrickRequests {
+    uint data[];
+} lod7BrickRequests;
 
 layout(push_constant) uniform PushConstants {
     vec4 cameraPos;
     vec4 cameraForward;
     vec4 cameraRight;
     vec4 cameraUp;
-    ivec4 worldMin;
-    ivec4 worldMax;
-    ivec4 chunkWindowDimensions;
-    vec4 renderParams;
+    vec4 visualizationParams;
+    ivec4 renderModeParams;
 } pc;
 
 const float BIG = 1e30;
@@ -62,14 +185,32 @@ const uint CHUNK_ACCEL_2_OFFSET = CHUNK_ACCEL_4_OFFSET + CHUNK_ACCEL_4_WORD_COUN
 const uint CHUNK_BRICK_MAP_OFFSET = CHUNK_ACCEL_WORD_COUNT;
 const uint CHUNK_RECORD_WORD_COUNT = CHUNK_ACCEL_WORD_COUNT + uint(BRICK_COUNT) * BRICK_MAP_ENTRY_WORD_COUNT;
 
-// Keep this mirrored with src/world/gpu_world_layout.hpp.
-
 struct RayQueryCounters {
     int chunkSteps;
     int brickSteps;
     int brickTests;
     int coarseCellSteps;
     int voxelTests;
+};
+
+struct LodTraceContext {
+    int lodIndex;
+    ivec3 worldMin;
+    ivec3 worldMax;
+    ivec3 chunkWindowDimensions;
+    int chunkWorldSpan;
+    int localCellWorldStep;
+};
+
+struct TraceResult {
+    bool hit;
+    bool requestedFallback;
+    bool intersectsCoverage;
+    float coverageStartT;
+    float coverageEndT;
+    float hitT;
+    vec3 hitNormal;
+    uint hitMaterialId;
 };
 
 void initRayQueryCounters(out RayQueryCounters counters) {
@@ -81,11 +222,15 @@ void initRayQueryCounters(out RayQueryCounters counters) {
 }
 
 int debugVisualizationMode() {
-    return int(pc.renderParams.w + 0.5);
+    return pc.renderModeParams.x;
+}
+
+int lodRenderMode() {
+    return pc.renderModeParams.y;
 }
 
 float debugVisualizationIntensity() {
-    return max(pc.renderParams.x, 0.001);
+    return max(pc.visualizationParams.x, 0.001);
 }
 
 float normalizedLogCount(float value, float maxLogValue) {
@@ -118,32 +263,36 @@ vec3 heatPalette(float t) {
 
 vec3 rayQueryBreakdownColor(RayQueryCounters counters) {
     float voxel = normalizedLogCount(float(counters.voxelTests), 4.5);
-    float sparse = normalizedLogCount(float(counters.brickSteps + counters.brickTests + counters.coarseCellSteps), 5.0);
-    float chunk = normalizedLogCount(float(counters.chunkSteps), 3.5);
-    return vec3(voxel, sparse, chunk);
+    float brick = normalizedLogCount(float(counters.brickSteps + counters.brickTests + counters.coarseCellSteps), 5.0);
+    float chunk = normalizedLogCount(float(counters.chunkSteps), 4.0);
+    vec3 color = vec3(voxel, brick, chunk);
+    float peak = max(max(color.r, color.g), color.b);
+    if (peak <= 0.0) {
+        return vec3(0.0);
+    }
+    return color / peak;
 }
 
-vec3 applySurfaceQueryVisualization(vec3 litBaseColor, RayQueryCounters counters) {
+vec3 applySurfaceQueryVisualization(vec3 baseColor, RayQueryCounters counters) {
     int mode = debugVisualizationMode();
     if (mode == 1) {
-        vec3 heatColor = heatPalette(rayQueryHeatValue(counters));
-        return mix(litBaseColor * 0.18, heatColor, 0.88);
+        return mix(baseColor, heatPalette(rayQueryHeatValue(counters)), 0.8);
     }
     if (mode == 2) {
-        return mix(litBaseColor * 0.18, rayQueryBreakdownColor(counters), 0.90);
+        return mix(baseColor, rayQueryBreakdownColor(counters), 0.75);
     }
-    return litBaseColor;
+    return baseColor;
 }
 
-vec3 applySkyQueryVisualization(vec3 skyColor, RayQueryCounters counters) {
+vec3 applySkyQueryVisualization(vec3 baseColor, RayQueryCounters counters) {
     int mode = debugVisualizationMode();
     if (mode == 1) {
-        return mix(skyColor * 0.35, heatPalette(rayQueryHeatValue(counters)), 0.75);
+        return mix(baseColor, heatPalette(rayQueryHeatValue(counters)), 0.55);
     }
     if (mode == 2) {
-        return mix(skyColor * 0.35, rayQueryBreakdownColor(counters), 0.75);
+        return mix(baseColor, rayQueryBreakdownColor(counters), 0.50);
     }
-    return skyColor;
+    return baseColor;
 }
 
 vec3 backgroundColor(vec3 rd) {
@@ -180,88 +329,202 @@ vec3 applyGamma(vec3 color) {
     return pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 
-ivec3 worldVoxelMin() {
-    return pc.worldMin.xyz;
+bool traceChunk(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId, out bool requestedFallback);
+bool traceChunkBrickRange(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 chunkWorldMinPos, uint chunkRecordBase, ivec3 brickMin, ivec3 brickMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId, out bool requestedFallback);
+
+LodTraceContext makeLodTraceContext(int lodIndex) {
+    GpuLodMetadata metadata = worldMetadata.lods[lodIndex];
+    LodTraceContext ctx;
+    ctx.lodIndex = lodIndex;
+    ctx.worldMin = metadata.worldMin.xyz;
+    ctx.worldMax = metadata.worldMax.xyz;
+    ctx.chunkWindowDimensions = metadata.chunkWindowDimensions.xyz;
+    ctx.chunkWorldSpan = metadata.traversalInfo.x;
+    ctx.localCellWorldStep = metadata.traversalInfo.y;
+    return ctx;
 }
 
-ivec3 worldVoxelMax() {
-    return pc.worldMax.xyz;
+ivec3 worldChunkMin(LodTraceContext ctx) {
+    return ivec3(
+        int(floor(float(ctx.worldMin.x) / float(ctx.chunkWorldSpan))),
+        int(floor(float(ctx.worldMin.y) / float(ctx.chunkWorldSpan))),
+        int(floor(float(ctx.worldMin.z) / float(ctx.chunkWorldSpan)))
+    );
 }
 
-ivec3 worldChunkMin() {
-    return worldVoxelMin() / CHUNK_SIZE;
+ivec3 worldChunkMaxExclusive(LodTraceContext ctx) {
+    return worldChunkMin(ctx) + ctx.chunkWindowDimensions;
 }
 
-bool inWorldBounds(ivec3 p) {
-    ivec3 boundsMin = worldVoxelMin();
-    ivec3 boundsMax = worldVoxelMax();
-    return p.x >= boundsMin.x && p.y >= boundsMin.y && p.z >= boundsMin.z &&
-           p.x < boundsMax.x && p.y < boundsMax.y && p.z < boundsMax.z;
+vec3 chunkGridWorldMin(LodTraceContext ctx) {
+    return vec3(worldChunkMin(ctx) * ctx.chunkWorldSpan);
 }
 
-bool inChunkBounds(ivec3 chunkCoord) {
-    ivec3 boundsMin = worldChunkMin();
-    ivec3 boundsMax = boundsMin + pc.chunkWindowDimensions.xyz;
+vec3 chunkGridWorldMax(LodTraceContext ctx) {
+    return vec3(worldChunkMaxExclusive(ctx) * ctx.chunkWorldSpan);
+}
+
+bool inWorldBounds(LodTraceContext ctx, ivec3 p) {
+    return p.x >= ctx.worldMin.x && p.y >= ctx.worldMin.y && p.z >= ctx.worldMin.z &&
+           p.x < ctx.worldMax.x && p.y < ctx.worldMax.y && p.z < ctx.worldMax.z;
+}
+
+bool inChunkBounds(LodTraceContext ctx, ivec3 chunkCoord) {
+    ivec3 boundsMin = worldChunkMin(ctx);
+    ivec3 boundsMax = worldChunkMaxExclusive(ctx);
     return chunkCoord.x >= boundsMin.x && chunkCoord.y >= boundsMin.y && chunkCoord.z >= boundsMin.z &&
            chunkCoord.x < boundsMax.x && chunkCoord.y < boundsMax.y && chunkCoord.z < boundsMax.z;
 }
 
-int chunkIndex(ivec3 localChunkCoord) {
-    return localChunkCoord.x + pc.chunkWindowDimensions.x * (localChunkCoord.y + pc.chunkWindowDimensions.y * localChunkCoord.z);
+int chunkIndex(LodTraceContext ctx, ivec3 chunkCoord) {
+    ivec3 localChunkCoord = chunkCoord - worldChunkMin(ctx);
+    return localChunkCoord.x + ctx.chunkWindowDimensions.x * (localChunkCoord.y + ctx.chunkWindowDimensions.y * localChunkCoord.z);
+}
+
+int brickWorldSpan(LodTraceContext ctx) {
+    return BRICK_SIZE * ctx.localCellWorldStep;
+}
+
+int coarseCellWorldSpan(LodTraceContext ctx) {
+    return COARSE_CELL_SIZE * ctx.localCellWorldStep;
 }
 
 uint mortonBrickIndex(ivec3 brickCoord) {
     uint x = uint(brickCoord.x) & 0xFu;
     uint y = uint(brickCoord.y) & 0xFu;
     uint z = uint(brickCoord.z) & 0xFu;
-    return
-        ((x & 0x1u) << 0u) |
-        ((y & 0x1u) << 1u) |
-        ((z & 0x1u) << 2u) |
-        ((x & 0x2u) << 2u) |
-        ((y & 0x2u) << 3u) |
-        ((z & 0x2u) << 4u) |
-        ((x & 0x4u) << 4u) |
-        ((y & 0x4u) << 5u) |
-        ((z & 0x4u) << 6u) |
-        ((x & 0x8u) << 6u) |
-        ((y & 0x8u) << 7u) |
-        ((z & 0x8u) << 8u);
+    return (x & 0x1u) |
+           ((y & 0x1u) << 1u) |
+           ((z & 0x1u) << 2u) |
+           ((x & 0x2u) << 2u) |
+           ((y & 0x2u) << 3u) |
+           ((z & 0x2u) << 4u) |
+           ((x & 0x4u) << 4u) |
+           ((y & 0x4u) << 5u) |
+           ((z & 0x4u) << 6u) |
+           ((x & 0x8u) << 6u) |
+           ((y & 0x8u) << 7u) |
+           ((z & 0x8u) << 8u);
 }
 
-uint loadChunkRecordBase(ivec3 localChunkCoord) {
-    uint chunkPoolIndex = chunkWindowIndices.data[chunkIndex(localChunkCoord)];
+uint loadChunkWindowWord(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) return chunkWindowIndices.data[index];
+    if (ctx.lodIndex == 1) return lod1ChunkWindowIndices.data[index];
+    if (ctx.lodIndex == 2) return lod2ChunkWindowIndices.data[index];
+    if (ctx.lodIndex == 3) return lod3ChunkWindowIndices.data[index];
+    if (ctx.lodIndex == 4) return lod4ChunkWindowIndices.data[index];
+    if (ctx.lodIndex == 5) return lod5ChunkWindowIndices.data[index];
+    if (ctx.lodIndex == 6) return lod6ChunkWindowIndices.data[index];
+    return lod7ChunkWindowIndices.data[index];
+}
+
+uint loadChunkBrickMapWord(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) return chunkBrickMaps.data[index];
+    if (ctx.lodIndex == 1) return lod1ChunkBrickMaps.data[index];
+    if (ctx.lodIndex == 2) return lod2ChunkBrickMaps.data[index];
+    if (ctx.lodIndex == 3) return lod3ChunkBrickMaps.data[index];
+    if (ctx.lodIndex == 4) return lod4ChunkBrickMaps.data[index];
+    if (ctx.lodIndex == 5) return lod5ChunkBrickMaps.data[index];
+    if (ctx.lodIndex == 6) return lod6ChunkBrickMaps.data[index];
+    return lod7ChunkBrickMaps.data[index];
+}
+
+uint loadBrickPoolWord(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) return brickPool.data[index];
+    if (ctx.lodIndex == 1) return lod1BrickPool.data[index];
+    if (ctx.lodIndex == 2) return lod2BrickPool.data[index];
+    if (ctx.lodIndex == 3) return lod3BrickPool.data[index];
+    if (ctx.lodIndex == 4) return lod4BrickPool.data[index];
+    if (ctx.lodIndex == 5) return lod5BrickPool.data[index];
+    if (ctx.lodIndex == 6) return lod6BrickPool.data[index];
+    return lod7BrickPool.data[index];
+}
+
+uint loadBrickRequestWord(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) return brickRequests.data[index];
+    if (ctx.lodIndex == 1) return lod1BrickRequests.data[index];
+    if (ctx.lodIndex == 2) return lod2BrickRequests.data[index];
+    if (ctx.lodIndex == 3) return lod3BrickRequests.data[index];
+    if (ctx.lodIndex == 4) return lod4BrickRequests.data[index];
+    if (ctx.lodIndex == 5) return lod5BrickRequests.data[index];
+    if (ctx.lodIndex == 6) return lod6BrickRequests.data[index];
+    return lod7BrickRequests.data[index];
+}
+
+uint addBrickRequestWord(LodTraceContext ctx, uint index, uint value) {
+    if (ctx.lodIndex == 0) return atomicAdd(brickRequests.data[index], value);
+    if (ctx.lodIndex == 1) return atomicAdd(lod1BrickRequests.data[index], value);
+    if (ctx.lodIndex == 2) return atomicAdd(lod2BrickRequests.data[index], value);
+    if (ctx.lodIndex == 3) return atomicAdd(lod3BrickRequests.data[index], value);
+    if (ctx.lodIndex == 4) return atomicAdd(lod4BrickRequests.data[index], value);
+    if (ctx.lodIndex == 5) return atomicAdd(lod5BrickRequests.data[index], value);
+    if (ctx.lodIndex == 6) return atomicAdd(lod6BrickRequests.data[index], value);
+    return atomicAdd(lod7BrickRequests.data[index], value);
+}
+
+void storeBrickRequestWord(LodTraceContext ctx, uint index, uint value) {
+    if (ctx.lodIndex == 0) { brickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 1) { lod1BrickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 2) { lod2BrickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 3) { lod3BrickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 4) { lod4BrickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 5) { lod5BrickRequests.data[index] = value; return; }
+    if (ctx.lodIndex == 6) { lod6BrickRequests.data[index] = value; return; }
+    lod7BrickRequests.data[index] = value;
+}
+
+uint markBrickRequested(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) return atomicOr(chunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 1) return atomicOr(lod1ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 2) return atomicOr(lod2ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 3) return atomicOr(lod3ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 4) return atomicOr(lod4ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 5) return atomicOr(lod5ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    if (ctx.lodIndex == 6) return atomicOr(lod6ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+    return atomicOr(lod7ChunkBrickMaps.data[index], BRICK_METADATA_REQUESTED_BIT);
+}
+
+void clearBrickRequested(LodTraceContext ctx, uint index) {
+    if (ctx.lodIndex == 0) { atomicAnd(chunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 1) { atomicAnd(lod1ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 2) { atomicAnd(lod2ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 3) { atomicAnd(lod3ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 4) { atomicAnd(lod4ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 5) { atomicAnd(lod5ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    if (ctx.lodIndex == 6) { atomicAnd(lod6ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT); return; }
+    atomicAnd(lod7ChunkBrickMaps.data[index], ~BRICK_METADATA_REQUESTED_BIT);
+}
+
+uint chunkRecordBase(LodTraceContext ctx, ivec3 chunkCoord) {
+    uint chunkPoolIndex = loadChunkWindowWord(ctx, uint(chunkIndex(ctx, chunkCoord)));
     return chunkPoolIndex * CHUNK_RECORD_WORD_COUNT;
 }
 
-bool chunkIsEmpty(uint chunkRecordBase) {
-    return (chunkBrickMaps.data[chunkRecordBase] & CHUNK_ACCEL_EMPTY_FLAG) != 0u;
+bool chunkIsEmpty(LodTraceContext ctx, uint chunkRecordBase) {
+    return (loadChunkBrickMapWord(ctx, chunkRecordBase) & CHUNK_ACCEL_EMPTY_FLAG) != 0u;
 }
 
-bool loadChunkAccelOccupancy(uint chunkRecordBase, uint wordOffset, int cellsPerAxis, ivec3 cellCoord) {
+bool loadChunkAccelOccupancy(LodTraceContext ctx, uint chunkRecordBase, uint wordOffset, int cellsPerAxis, ivec3 cellCoord) {
     uint bitIndex = uint(cellCoord.x + cellsPerAxis * (cellCoord.y + cellsPerAxis * cellCoord.z));
-    uint word = chunkBrickMaps.data[chunkRecordBase + wordOffset + bitIndex / 32u];
+    uint word = loadChunkBrickMapWord(ctx, chunkRecordBase + wordOffset + bitIndex / 32u);
     return ((word >> (bitIndex & 31u)) & 1u) != 0u;
 }
 
-bool loadChunkAccelOccupancy8(uint chunkRecordBase, ivec3 cellCoord) {
-    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_8_OFFSET, 8, cellCoord);
+bool loadChunkAccelOccupancy8(LodTraceContext ctx, uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(ctx, chunkRecordBase, CHUNK_ACCEL_8_OFFSET, 8, cellCoord);
 }
 
-bool loadChunkAccelOccupancy4(uint chunkRecordBase, ivec3 cellCoord) {
-    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_4_OFFSET, 4, cellCoord);
+bool loadChunkAccelOccupancy4(LodTraceContext ctx, uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(ctx, chunkRecordBase, CHUNK_ACCEL_4_OFFSET, 4, cellCoord);
 }
 
-bool loadChunkAccelOccupancy2(uint chunkRecordBase, ivec3 cellCoord) {
-    return loadChunkAccelOccupancy(chunkRecordBase, CHUNK_ACCEL_2_OFFSET, 2, cellCoord);
+bool loadChunkAccelOccupancy2(LodTraceContext ctx, uint chunkRecordBase, ivec3 cellCoord) {
+    return loadChunkAccelOccupancy(ctx, chunkRecordBase, CHUNK_ACCEL_2_OFFSET, 2, cellCoord);
 }
 
-uvec2 loadBrickEntry(uint chunkRecordBase, ivec3 brickCoord) {
+uvec2 loadBrickEntry(LodTraceContext ctx, uint chunkRecordBase, ivec3 brickCoord) {
     uint packedEntryIndex = chunkRecordBase + CHUNK_BRICK_MAP_OFFSET + mortonBrickIndex(brickCoord) * BRICK_MAP_ENTRY_WORD_COUNT;
-    return uvec2(
-        chunkBrickMaps.data[packedEntryIndex],
-        chunkBrickMaps.data[packedEntryIndex + 1u]
-    );
+    return uvec2(loadChunkBrickMapWord(ctx, packedEntryIndex), loadChunkBrickMapWord(ctx, packedEntryIndex + 1u));
 }
 
 uint brickEntryPackedIndex(uint chunkRecordBase, ivec3 brickCoord) {
@@ -284,158 +547,47 @@ bool brickEntryResident(uvec2 brickEntry) {
     return (brickEntry.y & BRICK_METADATA_RESIDENT_BIT) != 0u;
 }
 
-bool brickEntryRequested(uvec2 brickEntry) {
-    return (brickEntry.y & BRICK_METADATA_REQUESTED_BIT) != 0u;
-}
-
-void requestBrickIfNeeded(uint packedEntryIndex) {
-    uint previousMetadata = atomicOr(chunkBrickMaps.data[packedEntryIndex + 1u], BRICK_METADATA_REQUESTED_BIT);
+void requestBrickIfNeeded(LodTraceContext ctx, uint packedEntryIndex) {
+    uint previousMetadata = markBrickRequested(ctx, packedEntryIndex + 1u);
     if ((previousMetadata & BRICK_METADATA_REQUESTED_BIT) != 0u) {
         return;
     }
 
-    uint requestIndex = atomicAdd(brickRequests.data[0], 1u);
-    uint requestCapacity = brickRequests.data[2];
+    uint requestIndex = addBrickRequestWord(ctx, 0u, 1u);
+    uint requestCapacity = loadBrickRequestWord(ctx, 2u);
     if (requestIndex >= requestCapacity) {
-        atomicAdd(brickRequests.data[1], 1u);
-        atomicAnd(chunkBrickMaps.data[packedEntryIndex + 1u], ~BRICK_METADATA_REQUESTED_BIT);
+        addBrickRequestWord(ctx, 1u, 1u);
+        clearBrickRequested(ctx, packedEntryIndex + 1u);
         return;
     }
 
-    brickRequests.data[BRICK_REQUEST_HEADER_WORD_COUNT + requestIndex] = packedEntryIndex;
+    storeBrickRequestWord(ctx, BRICK_REQUEST_HEADER_WORD_COUNT + requestIndex, packedEntryIndex);
 }
 
 int coarseCellIndex(ivec3 coarseCell) {
     return coarseCell.x + COARSE_CELLS_PER_AXIS * (coarseCell.y + COARSE_CELLS_PER_AXIS * coarseCell.z);
 }
 
-bool loadBrickCoarseOccupancy(uint brickBase, ivec3 coarseCell) {
+bool loadBrickCoarseOccupancy(LodTraceContext ctx, uint brickBase, ivec3 coarseCell) {
     uint bitIndex = uint(coarseCellIndex(coarseCell));
-    uint word = brickPool.data[brickBase + bitIndex / 32u];
+    uint word = loadBrickPoolWord(ctx, brickBase + bitIndex / 32u);
     return ((word >> (bitIndex & 31u)) & 1u) != 0u;
 }
 
-uint loadBrickVoxel(uint brickBase, ivec3 localVoxel) {
+uint loadBrickVoxel(LodTraceContext ctx, uint brickBase, ivec3 localVoxel) {
     int flatIndex = localVoxel.x + BRICK_SIZE * (localVoxel.y + BRICK_SIZE * localVoxel.z);
-    uint packed = brickPool.data[
-        brickBase +
-        uint(OCCUPANCY_MASK_WORD_COUNT) +
-        uint(flatIndex / 4)
-    ];
+    uint packed = loadBrickPoolWord(ctx, brickBase + uint(OCCUPANCY_MASK_WORD_COUNT) + uint(flatIndex / 4));
     return (packed >> (8 * (flatIndex & 3))) & 0xFFu;
 }
 
-uvec2 loadBrickCoarseOccupancyWords(uint brickBase) {
-    return uvec2(
-        brickPool.data[brickBase],
-        brickPool.data[brickBase + 1u]
-    );
+uvec2 loadBrickCoarseOccupancyWords(LodTraceContext ctx, uint brickBase) {
+    return uvec2(loadBrickPoolWord(ctx, brickBase), loadBrickPoolWord(ctx, brickBase + 1u));
 }
 
 bool loadBrickCoarseOccupancyCached(uvec2 occupancyWords, ivec3 coarseCell) {
     uint bitIndex = uint(coarseCellIndex(coarseCell));
     uint word = bitIndex < 32u ? occupancyWords.x : occupancyWords.y;
     return ((word >> (bitIndex & 31u)) & 1u) != 0u;
-}
-
-uvec4 loadCoarseCellVoxelWords(uint brickBase, ivec3 cellLocalVoxelMin) {
-    uint voxelBase = brickBase + uint(OCCUPANCY_MASK_WORD_COUNT);
-    uint flatIndex00 = uint(cellLocalVoxelMin.x + BRICK_SIZE * (cellLocalVoxelMin.y + BRICK_SIZE * cellLocalVoxelMin.z));
-    uint flatIndex10 = uint(cellLocalVoxelMin.x + BRICK_SIZE * ((cellLocalVoxelMin.y + 1) + BRICK_SIZE * cellLocalVoxelMin.z));
-    uint flatIndex01 = uint(cellLocalVoxelMin.x + BRICK_SIZE * (cellLocalVoxelMin.y + BRICK_SIZE * (cellLocalVoxelMin.z + 1)));
-    uint flatIndex11 = uint(cellLocalVoxelMin.x + BRICK_SIZE * ((cellLocalVoxelMin.y + 1) + BRICK_SIZE * (cellLocalVoxelMin.z + 1)));
-    return uvec4(
-        brickPool.data[voxelBase + flatIndex00 / 4u],
-        brickPool.data[voxelBase + flatIndex10 / 4u],
-        brickPool.data[voxelBase + flatIndex01 / 4u],
-        brickPool.data[voxelBase + flatIndex11 / 4u]
-    );
-}
-
-uint loadCoarseCellVoxelCached(uvec4 coarseCellVoxelWords, ivec3 cellLocalVoxelMin, ivec3 localVoxelInCell) {
-    uint packedWord = 0u;
-    if (localVoxelInCell.z == 0) {
-        packedWord = localVoxelInCell.y == 0 ? coarseCellVoxelWords.x : coarseCellVoxelWords.y;
-    } else {
-        packedWord = localVoxelInCell.y == 0 ? coarseCellVoxelWords.z : coarseCellVoxelWords.w;
-    }
-
-    uint byteIndex = uint((cellLocalVoxelMin.x + localVoxelInCell.x) & 3);
-    return (packedWord >> (8u * byteIndex)) & 0xFFu;
-}
-
-vec3 normalForAxis(int axis, int stepSign);
-int selectMinAxis(vec3 v);
-
-bool traceOccupiedCoarseCell(vec3 ro, vec3 rd, uint brickBase, ivec3 cellWorldMin, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(inv);
-
-    float t = startT;
-    vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 voxel = ivec3(floor(samplePos));
-    vec3 currentNormal = entryNormal;
-
-    vec3 nextBoundary = vec3(
-        step.x > 0 ? float(voxel.x + 1) : float(voxel.x),
-        step.y > 0 ? float(voxel.y + 1) : float(voxel.y),
-        step.z > 0 ? float(voxel.z + 1) : float(voxel.z)
-    );
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
-
-    for (int i = 0; i < COARSE_CELL_SIZE * COARSE_CELL_SIZE * COARSE_CELL_SIZE; i++) {
-        ivec3 localVoxelInCell = voxel - cellWorldMin;
-        if (all(greaterThanEqual(localVoxelInCell, ivec3(0))) && all(lessThan(localVoxelInCell, ivec3(COARSE_CELL_SIZE)))) {
-            counters.voxelTests++;
-            ivec3 localVoxel = (voxel - cellWorldMin) + ivec3(
-                (cellWorldMin.x & (BRICK_SIZE - 1)),
-                (cellWorldMin.y & (BRICK_SIZE - 1)),
-                (cellWorldMin.z & (BRICK_SIZE - 1))
-            );
-            if (loadBrickVoxel(brickBase, localVoxel) != AIR_MATERIAL) {
-                hitT = t;
-                hitNormal = currentNormal;
-                return true;
-            }
-        } else {
-            break;
-        }
-
-        int axis = selectMinAxis(tMax);
-        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
-        if (nextT >= endT) {
-            break;
-        }
-
-        if (axis == 0) {
-            voxel.x += step.x;
-            tMax.x += tDelta.x;
-        } else if (axis == 1) {
-            voxel.y += step.y;
-            tMax.y += tDelta.y;
-        } else {
-            voxel.z += step.z;
-            tMax.z += tDelta.z;
-        }
-
-        t = nextT;
-        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
-    }
-
-    return false;
 }
 
 vec3 normalForAxis(int axis, int stepSign) {
@@ -469,65 +621,108 @@ vec3 entryNormalFromIntersection(vec3 tMin, vec3 rd, float entryT) {
 }
 
 bool intersectAabb(vec3 ro, vec3 rd, vec3 boundsMin, vec3 boundsMax, out float entryT, out float exitT, out vec3 entryNormal) {
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-
+    vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
     vec3 t0 = (boundsMin - ro) * inv;
     vec3 t1 = (boundsMax - ro) * inv;
     vec3 tMin = min(t0, t1);
     vec3 tMax = max(t0, t1);
-
     entryT = max(max(tMin.x, tMin.y), tMin.z);
     exitT = min(min(tMax.x, tMax.y), tMax.z);
     entryNormal = entryNormalFromIntersection(tMin, rd, entryT);
     return exitT > max(entryT, 0.0);
 }
 
-bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
+ivec3 clampChunkCoordToBounds(LodTraceContext ctx, ivec3 chunkCoord) {
+    return clamp(chunkCoord, worldChunkMin(ctx), worldChunkMaxExclusive(ctx) - ivec3(1));
+}
+
+bool traceOccupiedCoarseCell(LodTraceContext ctx, vec3 ro, vec3 rd, uint brickBase, ivec3 cellWorldMin, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    int cellWorldSpan = coarseCellWorldSpan(ctx);
+    vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(float(ctx.localCellWorldStep)) * inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * (startT + EPS);
+    ivec3 voxel = ivec3(floor((samplePos - vec3(cellWorldMin)) / float(ctx.localCellWorldStep)));
+    voxel = clamp(voxel, ivec3(0), ivec3(cellWorldSpan / ctx.localCellWorldStep - 1));
+    vec3 currentNormal = entryNormal;
+
+    vec3 nextBoundary = vec3(cellWorldMin) + vec3(
+        float(step.x > 0 ? voxel.x + 1 : voxel.x),
+        float(step.y > 0 ? voxel.y + 1 : voxel.y),
+        float(step.z > 0 ? voxel.z + 1 : voxel.z)
+    ) * float(ctx.localCellWorldStep);
+    vec3 tMax = vec3((nextBoundary.x - ro.x) * inv.x, (nextBoundary.y - ro.y) * inv.y, (nextBoundary.z - ro.z) * inv.z);
+
+    for (int i = 0; i < cellWorldSpan * cellWorldSpan * cellWorldSpan; i++) {
+        if (all(greaterThanEqual(voxel, ivec3(0))) && all(lessThan(voxel, ivec3(cellWorldSpan / ctx.localCellWorldStep)))) {
+            counters.voxelTests++;
+            ivec3 localVoxel = (cellWorldMin / ctx.localCellWorldStep) + voxel;
+            localVoxel = ivec3(localVoxel.x & (BRICK_SIZE - 1), localVoxel.y & (BRICK_SIZE - 1), localVoxel.z & (BRICK_SIZE - 1));
+            if (loadBrickVoxel(ctx, brickBase, localVoxel) != AIR_MATERIAL) {
+                hitT = t;
+                hitNormal = currentNormal;
+                return true;
+            }
+        } else {
+            break;
+        }
+
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
+            break;
+        }
+
+        if (axis == 0) { voxel.x += step.x; tMax.x += tDelta.x; }
+        else if (axis == 1) { voxel.y += step.y; tMax.y += tDelta.y; }
+        else { voxel.z += step.z; tMax.z += tDelta.z; }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+    }
+
+    return false;
+}
+
+bool traceBrick(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 brickWorldMinPos, uint brickIndex, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal) {
     counters.brickTests++;
     if (endT <= startT + EPS) {
         return false;
     }
 
     uint brickBase = brickIndex * uint(PACKED_BRICK_WORD_COUNT);
-    uvec2 coarseOccupancyWords = loadBrickCoarseOccupancyWords(brickBase);
+    uvec2 coarseOccupancyWords = loadBrickCoarseOccupancyWords(ctx, brickBase);
+    int cellSpan = coarseCellWorldSpan(ctx);
 
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
+    vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(COARSE_CELL_SIZE) * inv);
+    vec3 tDelta = abs(vec3(float(cellSpan)) * inv);
 
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localCell = ivec3(floor((samplePos - vec3(brickWorldMin)) / float(COARSE_CELL_SIZE)));
+    ivec3 localCell = ivec3(floor((samplePos - vec3(brickWorldMinPos)) / float(cellSpan)));
     localCell = clamp(localCell, ivec3(0), ivec3(COARSE_CELLS_PER_AXIS - 1));
     vec3 currentNormal = entryNormal;
 
-    vec3 nextBoundary = vec3(brickWorldMin) + vec3(
+    vec3 nextBoundary = vec3(brickWorldMinPos) + vec3(
         float(step.x > 0 ? localCell.x + 1 : localCell.x),
         float(step.y > 0 ? localCell.y + 1 : localCell.y),
         float(step.z > 0 ? localCell.z + 1 : localCell.z)
-    ) * float(COARSE_CELL_SIZE);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
+    ) * float(cellSpan);
+    vec3 tMax = vec3((nextBoundary.x - ro.x) * inv.x, (nextBoundary.y - ro.y) * inv.y, (nextBoundary.z - ro.z) * inv.z);
 
     for (int i = 0; i < COARSE_CELL_COUNT; i++) {
         counters.coarseCellSteps++;
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-
         if (loadBrickCoarseOccupancyCached(coarseOccupancyWords, localCell)) {
-            ivec3 cellWorldMin = brickWorldMin + localCell * COARSE_CELL_SIZE;
-            ivec3 cellLocalVoxelMin = localCell * COARSE_CELL_SIZE;
-            if (traceOccupiedCoarseCell(ro, rd, brickBase, cellWorldMin, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+            ivec3 cellWorldMin = brickWorldMinPos + localCell * cellSpan;
+            if (traceOccupiedCoarseCell(ctx, ro, rd, brickBase, cellWorldMin, t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
                 return true;
             }
         }
@@ -538,16 +733,9 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
             break;
         }
 
-        if (axis == 0) {
-            localCell.x += step.x;
-            tMax.x += tDelta.x;
-        } else if (axis == 1) {
-            localCell.y += step.y;
-            tMax.y += tDelta.y;
-        } else {
-            localCell.z += step.z;
-            tMax.z += tDelta.z;
-        }
+        if (axis == 0) { localCell.x += step.x; tMax.x += tDelta.x; }
+        else if (axis == 1) { localCell.y += step.y; tMax.y += tDelta.y; }
+        else { localCell.z += step.z; tMax.z += tDelta.z; }
 
         if (any(lessThan(localCell, ivec3(0))) || any(greaterThanEqual(localCell, ivec3(COARSE_CELLS_PER_AXIS)))) {
             break;
@@ -560,62 +748,192 @@ bool traceBrick(vec3 ro, vec3 rd, ivec3 brickWorldMin, uint brickIndex, float st
     return false;
 }
 
-bool advanceDdaCell(inout ivec3 cell, ivec3 step, ivec3 cellMin, ivec3 cellMaxExclusive, inout vec3 tMax, vec3 tDelta, out float nextT, out vec3 crossedNormal) {
-    int axis = selectMinAxis(tMax);
-    nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
-
-    if (axis == 0) {
-        cell.x += step.x;
-        tMax.x += tDelta.x;
-        crossedNormal = normalForAxis(0, step.x);
-    } else if (axis == 1) {
-        cell.y += step.y;
-        tMax.y += tDelta.y;
-        crossedNormal = normalForAxis(1, step.y);
-    } else {
-        cell.z += step.z;
-        tMax.z += tDelta.z;
-        crossedNormal = normalForAxis(2, step.z);
+bool traceParentLodBrickFallback(
+    LodTraceContext childCtx,
+    vec3 ro,
+    vec3 rd,
+    ivec3 missingBrickWorldMin,
+    float startT,
+    float endT,
+    vec3 entryNormal,
+    inout RayQueryCounters counters,
+    out float hitT,
+    out vec3 hitNormal,
+    out uint hitMaterialId
+) {
+    if (childCtx.lodIndex + 1 >= WORLD_LOD_COUNT || endT <= startT + EPS) {
+        return false;
     }
 
-    return all(greaterThanEqual(cell, cellMin)) && all(lessThan(cell, cellMaxExclusive));
+    LodTraceContext parentCtx = makeLodTraceContext(childCtx.lodIndex + 1);
+    int childBrickSpan = brickWorldSpan(childCtx);
+    ivec3 missingBrickWorldMax = missingBrickWorldMin + ivec3(childBrickSpan);
+    ivec3 fallbackSamplePoint = clamp(missingBrickWorldMin, parentCtx.worldMin, parentCtx.worldMax - ivec3(1));
+    if (!inWorldBounds(parentCtx, fallbackSamplePoint)) {
+        return false;
+    }
+
+    ivec3 parentChunkCoord = ivec3(floor(vec3(fallbackSamplePoint) / float(parentCtx.chunkWorldSpan)));
+    if (!inChunkBounds(parentCtx, parentChunkCoord)) {
+        return false;
+    }
+
+    ivec3 parentChunkWorldMin = parentChunkCoord * parentCtx.chunkWorldSpan;
+    int parentBrickSpan = brickWorldSpan(parentCtx);
+    ivec3 parentLocalBrick = ivec3(floor((vec3(fallbackSamplePoint) - vec3(parentChunkWorldMin)) / float(parentBrickSpan)));
+    parentLocalBrick = clamp(parentLocalBrick, ivec3(0), ivec3(BRICKS_PER_AXIS - 1));
+
+    ivec3 parentBrickWorldMin = parentChunkWorldMin + parentLocalBrick * parentBrickSpan;
+    ivec3 parentBrickWorldMax = parentBrickWorldMin + ivec3(parentBrickSpan);
+
+    ivec3 overlapMin = max(missingBrickWorldMin, parentBrickWorldMin);
+    ivec3 overlapMax = min(missingBrickWorldMax, parentBrickWorldMax);
+    if (any(greaterThanEqual(overlapMin, overlapMax))) {
+        return false;
+    }
+
+    float overlapEntryT = 0.0;
+    float overlapExitT = 0.0;
+    vec3 overlapEntryNormal = entryNormal;
+    if (!intersectAabb(ro, rd, vec3(overlapMin), vec3(overlapMax), overlapEntryT, overlapExitT, overlapEntryNormal)) {
+        return false;
+    }
+
+    float clippedStartT = max(startT, overlapEntryT);
+    float clippedEndT = min(endT, overlapExitT);
+    if (clippedEndT <= clippedStartT + EPS) {
+        return false;
+    }
+
+    uint parentChunkRecordBase = chunkRecordBase(parentCtx, parentChunkCoord);
+    uvec2 parentEntry = loadBrickEntry(parentCtx, parentChunkRecordBase, parentLocalBrick);
+    if (!brickEntryHasBrick(parentEntry)) {
+        uint materialId = brickEntryMaterialId(parentEntry);
+        if (materialId == AIR_MATERIAL) {
+            return false;
+        }
+
+        hitT = clippedStartT;
+        hitNormal = overlapEntryNormal;
+        hitMaterialId = materialId;
+        return true;
+    }
+
+    if (!brickEntryResident(parentEntry)) {
+        return false;
+    }
+
+    if (!traceBrick(parentCtx, ro, rd, parentBrickWorldMin, brickEntryIndex(parentEntry), clippedStartT, clippedEndT, overlapEntryNormal, counters, hitT, hitNormal)) {
+        return false;
+    }
+
+    hitMaterialId = STONE_MATERIAL;
+    return true;
 }
 
-bool traceChunkBrickRange(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 brickMin, ivec3 brickMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
+bool traceParentLodChunkFallback(
+    LodTraceContext childCtx,
+    vec3 ro,
+    vec3 rd,
+    ivec3 missingChunkWorldMin,
+    float startT,
+    float endT,
+    vec3 entryNormal,
+    inout RayQueryCounters counters,
+    out float hitT,
+    out vec3 hitNormal,
+    out uint hitMaterialId
+) {
+    if (childCtx.lodIndex + 1 >= WORLD_LOD_COUNT || endT <= startT + EPS) {
+        return false;
+    }
+
+    LodTraceContext parentCtx = makeLodTraceContext(childCtx.lodIndex + 1);
+    ivec3 childChunkWorldMax = missingChunkWorldMin + ivec3(childCtx.chunkWorldSpan);
+    ivec3 fallbackSamplePoint = clamp(missingChunkWorldMin, parentCtx.worldMin, parentCtx.worldMax - ivec3(1));
+    if (!inWorldBounds(parentCtx, fallbackSamplePoint)) {
+        return false;
+    }
+
+    ivec3 parentChunkCoord = ivec3(floor(vec3(fallbackSamplePoint) / float(parentCtx.chunkWorldSpan)));
+    if (!inChunkBounds(parentCtx, parentChunkCoord)) {
+        return false;
+    }
+
+    ivec3 parentChunkWorldMin = parentChunkCoord * parentCtx.chunkWorldSpan;
+    ivec3 parentChunkWorldMax = parentChunkWorldMin + ivec3(parentCtx.chunkWorldSpan);
+    ivec3 overlapMin = max(missingChunkWorldMin, parentChunkWorldMin);
+    ivec3 overlapMax = min(childChunkWorldMax, parentChunkWorldMax);
+    if (any(greaterThanEqual(overlapMin, overlapMax))) {
+        return false;
+    }
+
+    float overlapEntryT = 0.0;
+    float overlapExitT = 0.0;
+    vec3 overlapEntryNormal = entryNormal;
+    if (!intersectAabb(ro, rd, vec3(overlapMin), vec3(overlapMax), overlapEntryT, overlapExitT, overlapEntryNormal)) {
+        return false;
+    }
+
+    float clippedStartT = max(startT, overlapEntryT);
+    float clippedEndT = min(endT, overlapExitT);
+    if (clippedEndT <= clippedStartT + EPS) {
+        return false;
+    }
+
+    uint parentChunkRecordBase = chunkRecordBase(parentCtx, parentChunkCoord);
+    if (chunkIsEmpty(parentCtx, parentChunkRecordBase)) {
+        return false;
+    }
+
+    bool parentRequestedFallback = false;
+    return traceChunkBrickRange(
+        parentCtx,
+        ro,
+        rd,
+        parentChunkWorldMin,
+        parentChunkRecordBase,
+        ivec3(0),
+        ivec3(BRICKS_PER_AXIS),
+        clippedStartT,
+        clippedEndT,
+        overlapEntryNormal,
+        counters,
+        hitT,
+        hitNormal,
+        hitMaterialId,
+        parentRequestedFallback
+    );
+}
+
+bool traceChunkBrickRange(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 chunkWorldMinPos, uint chunkRecordBase, ivec3 brickMin, ivec3 brickMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId, out bool requestedFallback) {
     if (endT <= startT + EPS) {
         return false;
     }
 
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
+    int brickSpan = brickWorldSpan(ctx);
+    vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(BRICK_SIZE) * inv);
+    vec3 tDelta = abs(vec3(float(brickSpan)) * inv);
 
     float t = startT;
     vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE)));
+    ivec3 localBrick = ivec3(floor((samplePos - vec3(chunkWorldMinPos)) / float(brickSpan)));
     localBrick = clamp(localBrick, brickMin, brickMaxExclusive - ivec3(1));
     vec3 currentNormal = entryNormal;
 
-    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
+    vec3 nextBoundary = vec3(chunkWorldMinPos) + vec3(
         float(step.x > 0 ? localBrick.x + 1 : localBrick.x),
         float(step.y > 0 ? localBrick.y + 1 : localBrick.y),
         float(step.z > 0 ? localBrick.z + 1 : localBrick.z)
-    ) * float(BRICK_SIZE);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
+    ) * float(brickSpan);
+    vec3 tMax = vec3((nextBoundary.x - ro.x) * inv.x, (nextBoundary.y - ro.y) * inv.y, (nextBoundary.z - ro.z) * inv.z);
 
     int maxBrickSteps = (brickMaxExclusive.x - brickMin.x) * (brickMaxExclusive.y - brickMin.y) * (brickMaxExclusive.z - brickMin.z);
     for (int i = 0; i < maxBrickSteps; i++) {
         counters.brickSteps++;
         uint packedEntryIndex = brickEntryPackedIndex(chunkRecordBase, localBrick);
-        uvec2 entry = loadBrickEntry(chunkRecordBase, localBrick);
+        uvec2 entry = loadBrickEntry(ctx, chunkRecordBase, localBrick);
         float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
 
         if (!brickEntryHasBrick(entry)) {
@@ -625,285 +943,19 @@ bool traceChunkBrickRange(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecor
                 hitMaterialId = brickEntryMaterialId(entry);
                 return true;
             }
+        } else if (brickEntryResident(entry)) {
+            ivec3 brickWorldMinPos = chunkWorldMinPos + localBrick * brickSpan;
+            if (traceBrick(ctx, ro, rd, brickWorldMinPos, brickEntryIndex(entry), t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
+                hitMaterialId = STONE_MATERIAL;
+                return true;
+            }
         } else {
-            if (!brickEntryResident(entry)) {
-                if (!brickEntryRequested(entry)) {
-                    requestBrickIfNeeded(packedEntryIndex);
-                }
-            } else {
-                ivec3 brickWorldMin = chunkWorldMin + localBrick * BRICK_SIZE;
-                if (traceBrick(ro, rd, brickWorldMin, brickEntryIndex(entry), t, segmentEnd, currentNormal, counters, hitT, hitNormal)) {
-                    hitMaterialId = brickEntryMaterialId(entry);
-                    return true;
-                }
-            }
-        }
-
-        float nextT = 0.0;
-        vec3 crossedNormal = vec3(0.0);
-        if (!advanceDdaCell(localBrick, step, brickMin, brickMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
-            break;
-        }
-
-        t = nextT;
-        currentNormal = crossedNormal;
-    }
-
-    return false;
-}
-
-bool traceChunkAccel8(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    const int CELL_BRICKS = 2;
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
-
-    float t = startT;
-    vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
-    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
-    vec3 currentNormal = entryNormal;
-
-    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
-        float(step.x > 0 ? localCell.x + 1 : localCell.x),
-        float(step.y > 0 ? localCell.y + 1 : localCell.y),
-        float(step.z > 0 ? localCell.z + 1 : localCell.z)
-    ) * float(BRICK_SIZE * CELL_BRICKS);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
-
-    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
-    for (int i = 0; i < maxCellSteps; i++) {
-        counters.brickSteps++;
-        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-
-        if (loadChunkAccelOccupancy8(chunkRecordBase, localCell)) {
-            ivec3 brickMin = localCell * CELL_BRICKS;
-            ivec3 brickMaxExclusive = brickMin + ivec3(CELL_BRICKS);
-            if (traceChunkBrickRange(ro, rd, chunkWorldMin, chunkRecordBase, brickMin, brickMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
+            ivec3 brickWorldMinPos = chunkWorldMinPos + localBrick * brickSpan;
+            requestBrickIfNeeded(ctx, packedEntryIndex);
+            requestedFallback = true;
+            if (traceParentLodBrickFallback(ctx, ro, rd, brickWorldMinPos, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
                 return true;
             }
-        }
-
-        float nextT = 0.0;
-        vec3 crossedNormal = vec3(0.0);
-        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
-            break;
-        }
-
-        t = nextT;
-        currentNormal = crossedNormal;
-    }
-
-    return false;
-}
-
-bool traceChunkAccel4(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    const int CELL_BRICKS = 4;
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
-
-    float t = startT;
-    vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
-    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
-    vec3 currentNormal = entryNormal;
-
-    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
-        float(step.x > 0 ? localCell.x + 1 : localCell.x),
-        float(step.y > 0 ? localCell.y + 1 : localCell.y),
-        float(step.z > 0 ? localCell.z + 1 : localCell.z)
-    ) * float(BRICK_SIZE * CELL_BRICKS);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
-
-    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
-    for (int i = 0; i < maxCellSteps; i++) {
-        counters.brickSteps++;
-        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-
-        if (loadChunkAccelOccupancy4(chunkRecordBase, localCell)) {
-            ivec3 childCellMin = localCell * 2;
-            ivec3 childCellMaxExclusive = childCellMin + ivec3(2);
-            if (traceChunkAccel8(ro, rd, chunkWorldMin, chunkRecordBase, childCellMin, childCellMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
-                return true;
-            }
-        }
-
-        float nextT = 0.0;
-        vec3 crossedNormal = vec3(0.0);
-        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
-            break;
-        }
-
-        t = nextT;
-        currentNormal = crossedNormal;
-    }
-
-    return false;
-}
-
-bool traceChunkAccel2(vec3 ro, vec3 rd, ivec3 chunkWorldMin, uint chunkRecordBase, ivec3 cellMin, ivec3 cellMaxExclusive, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    const int CELL_BRICKS = 8;
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(BRICK_SIZE * CELL_BRICKS) * inv);
-
-    float t = startT;
-    vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 localCell = ivec3(floor((samplePos - vec3(chunkWorldMin)) / float(BRICK_SIZE * CELL_BRICKS)));
-    localCell = clamp(localCell, cellMin, cellMaxExclusive - ivec3(1));
-    vec3 currentNormal = entryNormal;
-
-    vec3 nextBoundary = vec3(chunkWorldMin) + vec3(
-        float(step.x > 0 ? localCell.x + 1 : localCell.x),
-        float(step.y > 0 ? localCell.y + 1 : localCell.y),
-        float(step.z > 0 ? localCell.z + 1 : localCell.z)
-    ) * float(BRICK_SIZE * CELL_BRICKS);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
-
-    int maxCellSteps = (cellMaxExclusive.x - cellMin.x) * (cellMaxExclusive.y - cellMin.y) * (cellMaxExclusive.z - cellMin.z);
-    for (int i = 0; i < maxCellSteps; i++) {
-        counters.brickSteps++;
-        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-
-        if (loadChunkAccelOccupancy2(chunkRecordBase, localCell)) {
-            ivec3 childCellMin = localCell * 2;
-            ivec3 childCellMaxExclusive = childCellMin + ivec3(2);
-            if (traceChunkAccel4(ro, rd, chunkWorldMin, chunkRecordBase, childCellMin, childCellMaxExclusive, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
-                return true;
-            }
-        }
-
-        float nextT = 0.0;
-        vec3 crossedNormal = vec3(0.0);
-        if (!advanceDdaCell(localCell, step, cellMin, cellMaxExclusive, tMax, tDelta, nextT, crossedNormal) || nextT >= endT) {
-            break;
-        }
-
-        t = nextT;
-        currentNormal = crossedNormal;
-    }
-
-    return false;
-}
-
-bool traceChunk(vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    ivec3 chunkWorldMin = chunkCoord * CHUNK_SIZE;
-    ivec3 localChunkCoord = chunkCoord - worldChunkMin();
-    uint chunkRecordBase = loadChunkRecordBase(localChunkCoord);
-    if (chunkIsEmpty(chunkRecordBase)) {
-        return false;
-    }
-
-    return traceChunkAccel2(
-        ro,
-        rd,
-        chunkWorldMin,
-        chunkRecordBase,
-        ivec3(0),
-        ivec3(2),
-        startT,
-        endT,
-        entryNormal,
-        counters,
-        hitT,
-        hitNormal,
-        hitMaterialId
-    );
-}
-
-bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId) {
-    float worldEntryT = 0.0;
-    float worldExitT = 0.0;
-    vec3 worldEntryNormal = vec3(0.0);
-    vec3 boundsMin = vec3(worldVoxelMin());
-    vec3 boundsMax = vec3(worldVoxelMax());
-    if (!intersectAabb(ro, rd, boundsMin, boundsMax, worldEntryT, worldExitT, worldEntryNormal)) {
-        return false;
-    }
-
-    float startT = max(worldEntryT, 0.0);
-    float endT = min(worldExitT, maxDistance);
-    if (endT <= startT + EPS) {
-        return false;
-    }
-
-    vec3 inv = vec3(
-        abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG,
-        abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG,
-        abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG
-    );
-    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
-    vec3 tDelta = abs(vec3(CHUNK_SIZE) * inv);
-
-    float t = startT;
-    vec3 samplePos = ro + rd * (startT + EPS);
-    ivec3 chunkCoord = ivec3(floor(samplePos / float(CHUNK_SIZE)));
-    ivec3 chunkBoundsMin = worldChunkMin();
-    ivec3 chunkBoundsMax = chunkBoundsMin + pc.chunkWindowDimensions.xyz - ivec3(1);
-    chunkCoord = clamp(chunkCoord, chunkBoundsMin, chunkBoundsMax);
-    vec3 currentNormal = worldEntryNormal;
-
-    vec3 nextBoundary = vec3(
-        float(step.x > 0 ? chunkCoord.x + 1 : chunkCoord.x),
-        float(step.y > 0 ? chunkCoord.y + 1 : chunkCoord.y),
-        float(step.z > 0 ? chunkCoord.z + 1 : chunkCoord.z)
-    ) * float(CHUNK_SIZE);
-    vec3 tMax = vec3(
-        (nextBoundary.x - ro.x) * inv.x,
-        (nextBoundary.y - ro.y) * inv.y,
-        (nextBoundary.z - ro.z) * inv.z
-    );
-
-    int maxChunkSteps = pc.chunkWindowDimensions.x * pc.chunkWindowDimensions.y * pc.chunkWindowDimensions.z;
-    for (int i = 0; i < maxChunkSteps; i++) {
-        counters.chunkSteps++;
-        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
-        if (traceChunk(ro, rd, chunkCoord, t, segmentEnd, currentNormal, counters, hitT, hitNormal, hitMaterialId)) {
-            return true;
         }
 
         int axis = selectMinAxis(tMax);
@@ -912,18 +964,11 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters coun
             break;
         }
 
-        if (axis == 0) {
-            chunkCoord.x += step.x;
-            tMax.x += tDelta.x;
-        } else if (axis == 1) {
-            chunkCoord.y += step.y;
-            tMax.y += tDelta.y;
-        } else {
-            chunkCoord.z += step.z;
-            tMax.z += tDelta.z;
-        }
+        if (axis == 0) { localBrick.x += step.x; tMax.x += tDelta.x; }
+        else if (axis == 1) { localBrick.y += step.y; tMax.y += tDelta.y; }
+        else { localBrick.z += step.z; tMax.z += tDelta.z; }
 
-        if (!inChunkBounds(chunkCoord)) {
+        if (any(lessThan(localBrick, brickMin)) || any(greaterThanEqual(localBrick, brickMaxExclusive))) {
             break;
         }
 
@@ -934,12 +979,173 @@ bool traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters coun
     return false;
 }
 
+bool traceChunk(LodTraceContext ctx, vec3 ro, vec3 rd, ivec3 chunkCoord, float startT, float endT, vec3 entryNormal, inout RayQueryCounters counters, out float hitT, out vec3 hitNormal, out uint hitMaterialId, out bool requestedFallback) {
+    if (endT <= startT + EPS) {
+        return false;
+    }
+
+    requestedFallback = false;
+    uint chunkRecordBase = chunkRecordBase(ctx, chunkCoord);
+    ivec3 chunkWorldMinPos = chunkCoord * ctx.chunkWorldSpan;
+    if (chunkIsEmpty(ctx, chunkRecordBase)) {
+        if (traceParentLodChunkFallback(ctx, ro, rd, chunkWorldMinPos, startT, endT, entryNormal, counters, hitT, hitNormal, hitMaterialId)) {
+            requestedFallback = true;
+            return true;
+        }
+        return false;
+    }
+
+    ivec3 chunkWorldMaxPos = chunkWorldMinPos + ivec3(ctx.chunkWorldSpan);
+    float entryT = 0.0;
+    float exitT = 0.0;
+    vec3 localEntryNormal = vec3(0.0);
+    if (!intersectAabb(ro, rd, vec3(chunkWorldMinPos), vec3(chunkWorldMaxPos), entryT, exitT, localEntryNormal)) {
+        return false;
+    }
+
+    float chunkStartT = max(startT, entryT);
+    float chunkEndT = min(endT, exitT);
+    if (chunkEndT <= chunkStartT + EPS) {
+        return false;
+    }
+
+    if (traceChunkBrickRange(ctx, ro, rd, chunkWorldMinPos, chunkRecordBase, ivec3(0), ivec3(BRICKS_PER_AXIS), chunkStartT, chunkEndT, entryNormal, counters, hitT, hitNormal, hitMaterialId, requestedFallback)) {
+        return true;
+    }
+
+    return false;
+}
+
+TraceResult traceSceneForLodInterval(LodTraceContext ctx, vec3 ro, vec3 rd, float minTraceT, float maxTraceT, inout RayQueryCounters counters) {
+    TraceResult result;
+    result.hit = false;
+    result.requestedFallback = false;
+    result.intersectsCoverage = false;
+    result.coverageStartT = BIG;
+    result.coverageEndT = -BIG;
+    result.hitT = 0.0;
+    result.hitNormal = vec3(0.0);
+    result.hitMaterialId = AIR_MATERIAL;
+
+    float worldEntryT = 0.0;
+    float worldExitT = 0.0;
+    vec3 worldEntryNormal = vec3(0.0);
+    if (!intersectAabb(ro, rd, chunkGridWorldMin(ctx), chunkGridWorldMax(ctx), worldEntryT, worldExitT, worldEntryNormal)) {
+        return result;
+    }
+
+    float startT = max(max(worldEntryT, 0.0), minTraceT);
+    float endT = min(worldExitT, maxTraceT);
+    if (endT <= startT + EPS) {
+        return result;
+    }
+
+    result.intersectsCoverage = true;
+    result.coverageStartT = startT;
+    result.coverageEndT = endT;
+
+    vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
+    ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);
+    vec3 tDelta = abs(vec3(float(ctx.chunkWorldSpan)) * inv);
+
+    float t = startT;
+    vec3 samplePos = ro + rd * startT;
+    if (worldEntryT >= 0.0) {
+        samplePos += worldEntryNormal * EPS * float(ctx.chunkWorldSpan);
+    }
+
+    ivec3 chunkCoord = clampChunkCoordToBounds(ctx, ivec3(floor(samplePos / float(ctx.chunkWorldSpan))));
+    vec3 currentNormal = worldEntryNormal;
+
+    vec3 nextBoundary = vec3(
+        float(step.x > 0 ? chunkCoord.x + 1 : chunkCoord.x),
+        float(step.y > 0 ? chunkCoord.y + 1 : chunkCoord.y),
+        float(step.z > 0 ? chunkCoord.z + 1 : chunkCoord.z)
+    ) * float(ctx.chunkWorldSpan);
+    vec3 tMax = vec3((nextBoundary.x - ro.x) * inv.x, (nextBoundary.y - ro.y) * inv.y, (nextBoundary.z - ro.z) * inv.z);
+
+    int maxChunkSteps = ctx.chunkWindowDimensions.x * ctx.chunkWindowDimensions.y * ctx.chunkWindowDimensions.z;
+    for (int i = 0; i < maxChunkSteps; i++) {
+        counters.chunkSteps++;
+        float segmentEnd = min(endT, min(tMax.x, min(tMax.y, tMax.z)));
+        if (traceChunk(ctx, ro, rd, chunkCoord, t, segmentEnd, currentNormal, counters, result.hitT, result.hitNormal, result.hitMaterialId, result.requestedFallback)) {
+            result.hit = true;
+            return result;
+        }
+
+        int axis = selectMinAxis(tMax);
+        float nextT = axis == 0 ? tMax.x : (axis == 1 ? tMax.y : tMax.z);
+        if (nextT >= endT) {
+            break;
+        }
+
+        if (axis == 0) { chunkCoord.x += step.x; tMax.x += tDelta.x; }
+        else if (axis == 1) { chunkCoord.y += step.y; tMax.y += tDelta.y; }
+        else { chunkCoord.z += step.z; tMax.z += tDelta.z; }
+
+        if (!inChunkBounds(ctx, chunkCoord)) {
+            break;
+        }
+
+        t = nextT;
+        currentNormal = normalForAxis(axis, axis == 0 ? step.x : (axis == 1 ? step.y : step.z));
+    }
+
+    return result;
+}
+
+TraceResult traceSceneForLod(LodTraceContext ctx, vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters counters) {
+    return traceSceneForLodInterval(ctx, ro, rd, 0.0, maxDistance, counters);
+}
+
+TraceResult traceScene(vec3 ro, vec3 rd, float maxDistance, inout RayQueryCounters counters) {
+    int mode = lodRenderMode();
+    if (mode >= 0 && mode < WORLD_LOD_COUNT) {
+        return traceSceneForLod(makeLodTraceContext(mode), ro, rd, maxDistance, counters);
+    }
+
+    TraceResult finalResult;
+    finalResult.hit = false;
+    finalResult.requestedFallback = false;
+    finalResult.intersectsCoverage = false;
+    finalResult.coverageStartT = BIG;
+    finalResult.coverageEndT = -BIG;
+    finalResult.hitT = BIG;
+    finalResult.hitNormal = vec3(0.0);
+    finalResult.hitMaterialId = AIR_MATERIAL;
+
+    float currentMinTraceT = 0.0;
+
+    for (int lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        TraceResult result = traceSceneForLodInterval(makeLodTraceContext(lodIndex), ro, rd, currentMinTraceT, maxDistance, counters);
+        finalResult.intersectsCoverage = finalResult.intersectsCoverage || result.intersectsCoverage;
+        finalResult.requestedFallback = finalResult.requestedFallback || result.requestedFallback;
+        finalResult.coverageStartT = min(finalResult.coverageStartT, result.coverageStartT);
+        finalResult.coverageEndT = max(finalResult.coverageEndT, result.coverageEndT);
+
+        if (result.hit) {
+            return result;
+        }
+
+        if (!result.intersectsCoverage) {
+            continue;
+        }
+
+        currentMinTraceT = max(currentMinTraceT, result.coverageEndT);
+        if (currentMinTraceT >= maxDistance - EPS) {
+            return finalResult;
+        }
+    }
+
+    return finalResult;
+}
+
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(destImage);
-
-    if (pixel.x >= size.x || pixel.y >= size.y)
+    if (pixel.x >= size.x || pixel.y >= size.y) {
         return;
+    }
 
     vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
     vec2 screen = uv * 2.0 - 1.0;
@@ -947,11 +1153,7 @@ void main() {
     screen.y *= -1.0;
 
     vec3 ro = pc.cameraPos.xyz;
-    vec3 rd = normalize(
-        pc.cameraForward.xyz * pc.renderParams.z +
-        pc.cameraRight.xyz * screen.x +
-        pc.cameraUp.xyz * screen.y
-    );
+    vec3 rd = normalize(pc.cameraForward.xyz * pc.visualizationParams.z + pc.cameraRight.xyz * screen.x + pc.cameraUp.xyz * screen.y);
 
     vec3 lightDir = normalize(vec3(-0.5, 0.35, -0.5));
     vec3 color = vec3(0.0);
@@ -959,19 +1161,15 @@ void main() {
     RayQueryCounters counters;
     initRayQueryCounters(counters);
 
-    float hitT = 0.0;
-    vec3 hitNormal = vec3(0.0);
-    uint hitMaterialId = AIR_MATERIAL;
-    if (traceScene(ro, rd, pc.renderParams.y, counters, hitT, hitNormal, hitMaterialId)) {
-        vec3 shadingNormal = dot(hitNormal, hitNormal) > 0.25 ? hitNormal : normalize(-rd);
-        vec3 hitPos = ro + rd * hitT;
+    TraceResult result = traceScene(ro, rd, pc.visualizationParams.y, counters);
+    if (result.hit) {
+        vec3 shadingNormal = dot(result.hitNormal, result.hitNormal) > 0.25 ? result.hitNormal : normalize(-rd);
+        vec3 hitPos = ro + rd * result.hitT;
         ivec3 voxelPos = ivec3(floor(hitPos - shadingNormal * 0.001));
-
-        vec3 baseColor = materialColor(hitMaterialId, voxelPos);
+        vec3 baseColor = materialColor(result.hitMaterialId, voxelPos);
         float ambient = 0.22;
         float sun = max(dot(shadingNormal, lightDir), 0.0);
         float lighting = ambient + 0.78 * sun;
-
         color = applySurfaceQueryVisualization(baseColor * lighting, counters);
     } else {
         vec3 skyColor = addSun(backgroundColor(rd), rd, lightDir);

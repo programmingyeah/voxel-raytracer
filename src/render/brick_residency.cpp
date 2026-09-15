@@ -33,15 +33,16 @@ uint32_t growCapacity(uint32_t currentCapacity, uint32_t requiredCapacity)
 }
 }
 
-void BrickResidencyManager::initializeForWorld(const VoxelWorld& world)
+void BrickResidencyManager::initializeForWorld(const VoxelWorld& world, WorldLod inLod)
 {
+    lod = inLod;
     gpuBrickCapacity = std::min<uint32_t>(static_cast<uint32_t>(world.getBrickCapacity()), INITIAL_GPU_BRICK_CAPACITY);
     if (gpuBrickCapacity == 0u) {
         gpuBrickCapacity = 1u;
     }
 
     nextGpuBrickSlot = 0u;
-    gpuSlotByChunkEntry.assign(chunkEntryCount(world.getChunkCount()), INVALID_GPU_BRICK_SLOT);
+    gpuSlotByChunkEntry.assign(chunkEntryCount(world.getChunkCount(lod)), INVALID_GPU_BRICK_SLOT);
     requestedChunkEntryBits.assign((gpuSlotByChunkEntry.size() + 63u) / 64u, 0u);
     cpuBrickToGpuBrick.assign(world.getBrickCapacity(), INVALID_GPU_BRICK_SLOT);
     gpuBrickToCpuBrick.assign(gpuBrickCapacity, BRICK_MAP_EMPTY);
@@ -83,9 +84,8 @@ void BrickResidencyManager::destroyRequestBuffers(Instance& instance)
     requestBuffers.clear();
 }
 
-void BrickResidencyManager::rebuildTrackedState(VoxelWorld& world, const std::vector<uint32_t>& data, const std::vector<GpuBufferCopyRegion>& regions)
+void BrickResidencyManager::rebuildTrackedState(VoxelWorld& world, WorldLod rebuildLod, const std::vector<uint32_t>& data, const std::vector<GpuBufferCopyRegion>& regions)
 {
-    (void)world;
     for (const GpuBufferCopyRegion& region : regions) {
         const size_t srcStart = region.srcWordOffset;
         const size_t dstStart = region.dstWordOffset;
@@ -174,6 +174,7 @@ void BrickResidencyManager::ensureGpuBrickCapacity(
 
 void BrickResidencyManager::processBrickRequests(
     size_t frameIndex,
+    WorldLod requestLod,
     VoxelWorld& world,
     Instance& instance,
     CommandPool& commandPool,
@@ -222,11 +223,11 @@ void BrickResidencyManager::processBrickRequests(
         }
 
         const uint32_t packedBrickIndex = brickEntryWordOffset / PACKED_BRICK_MAP_ENTRY_WORD_COUNT;
-        if (chunkSlotIndex >= world.getChunkCount() || packedBrickIndex >= Chunk::BRICK_COUNT) {
+        if (chunkSlotIndex >= world.getChunkCount(requestLod) || packedBrickIndex >= Chunk::BRICK_COUNT) {
             continue;
         }
         const size_t entryIndex = chunkEntryIndex(chunkSlotIndex, packedBrickIndex);
-        const Chunk::EncodedBrickMap& brickMap = world.getChunkBySlotIndex(chunkSlotIndex).getBrickMap();
+        const Chunk::EncodedBrickMap& brickMap = world.getChunkBySlotIndex(requestLod, chunkSlotIndex).getBrickMap();
         const glm::uvec3 brickCoord = decodeBrickMorton(packedBrickIndex);
         const uint32_t linearBrickIndex = brickCoord.x +
             Chunk::BRICKS_PER_AXIS * (brickCoord.y + Chunk::BRICKS_PER_AXIS * brickCoord.z);

@@ -23,28 +23,30 @@ size_t defaultMaxInFlightJobCount(size_t workerThreadCount) {
     return workerThreadCount > 0u ? workerThreadCount * 2u : 1u;
 }
 
-WorldGenerationStats generateChunkOnWorker(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions) {
+WorldGenerationStats generateChunkOnWorker(VoxelWorld& world, WorldLod lod, uint32_t chunkSlotIndex, uint32_t terrainWorldHeight) {
     WorldGenerationStats stats{};
+    stats.lod = lod;
     const auto generationStart = std::chrono::steady_clock::now();
     TerrainBuildResult buildResult{};
 
     try {
         const auto chunkBuildStart = std::chrono::steady_clock::now();
-        buildTerrainChunk(world, chunkSlotIndex, voxelDimensions, buildResult);
+        buildTerrainChunk(world, lod, chunkSlotIndex, terrainWorldHeight, buildResult);
         stats.averageChunkGenerationMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - chunkBuildStart
         ).count();
-        world.publishChunkGeneration(chunkSlotIndex, buildResult.solidVoxelCount, buildResult.allocatedBrickIndices);
+        world.publishChunkGeneration(lod, chunkSlotIndex, buildResult.solidVoxelCount, buildResult.allocatedBrickIndices);
         stats.totalGenerationMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - generationStart
         ).count();
-        stats.solidVoxelCount = world.getTotalSolidVoxelCount();
+        stats.solidVoxelCount = world.getTotalSolidVoxelCount(lod);
         return stats;
     } catch (...) {
-        world.abortChunkGeneration(chunkSlotIndex, buildResult.allocatedBrickIndices);
+        world.abortChunkGeneration(lod, chunkSlotIndex, buildResult.allocatedBrickIndices);
         throw;
     }
 }
+
 }
 
 WorldGenerator::WorldGenerator() {
@@ -71,11 +73,7 @@ WorldGenerator::~WorldGenerator() {
     }
 }
 
-void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ, glm::vec3 viewForward) {
-    if (world.getGeneratedChunkCount() >= world.getChunkCount()) {
-        return;
-    }
-
+void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::vec3 cameraPosition, glm::vec3 viewForward) {
     size_t jobBudget = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex);
@@ -87,34 +85,48 @@ void WorldGenerator::requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ
         jobBudget = maxInFlightJobs - inFlightJobCount;
     }
 
-    const std::vector<uint32_t> nextWindowIndices = findBestUngeneratedChunkWindowIndices(
-        world,
-        focusChunkXZ,
-        viewForward,
-        jobBudget
-    );
-    if (nextWindowIndices.empty()) {
-        return;
-    }
-
     size_t queuedJobCount = 0;
-    for (uint32_t nextWindowIndex : nextWindowIndices) {
-        uint32_t chunkSlotIndex = 0;
-        if (!world.tryBeginChunkGeneration(nextWindowIndex, chunkSlotIndex)) {
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        const WorldLod lod = static_cast<WorldLod>(lodIndex);
+        if (queuedJobCount >= jobBudget) {
+            break;
+        }
+
+        const size_t remainingBudget = jobBudget - queuedJobCount;
+        if (remainingBudget == 0u || world.getGeneratedChunkCount(lod) >= world.getChunkCount(lod)) {
             continue;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            if (stopRequested) {
-                world.abortChunkGeneration(chunkSlotIndex, {});
-                return;
+        const glm::ivec2 focusChunkXZ = world.chunkXZFromWorldPosition(lod, cameraPosition);
+        const std::vector<uint32_t> nextWindowIndices = findBestUngeneratedChunkWindowIndices(
+            world,
+            lod,
+            focusChunkXZ,
+            viewForward,
+            remainingBudget
+        );
+
+        for (uint32_t nextWindowIndex : nextWindowIndices) {
+            uint32_t chunkSlotIndex = 0;
+            if (!world.tryBeginChunkGeneration(lod, nextWindowIndex, chunkSlotIndex)) {
+                continue;
             }
 
-            pendingJobs.push({&world, chunkSlotIndex, world.getVoxelDimensions()});
-        }
+            {
+                std::lock_guard<std::mutex> lock(queueMutex);
+                if (stopRequested) {
+                    world.abortChunkGeneration(lod, chunkSlotIndex, {});
+                    return;
+                }
 
-        queuedJobCount++;
+                pendingJobs.push({&world, lod, chunkSlotIndex, world.getTerrainWorldHeight()});
+            }
+
+            queuedJobCount++;
+            if (queuedJobCount >= jobBudget) {
+                break;
+            }
+        }
     }
 
     if (queuedJobCount > 0u) {
@@ -154,7 +166,7 @@ void WorldGenerator::workerMain() {
 
         std::optional<WorldGenerationStats> stats;
         try {
-            stats = generateChunkOnWorker(*job.world, job.chunkSlotIndex, job.voxelDimensions);
+            stats = generateChunkOnWorker(*job.world, job.lod, job.chunkSlotIndex, job.terrainWorldHeight);
         } catch (const std::exception& e) {
             std::cerr << "world generation failed: " << e.what() << std::endl;
         }

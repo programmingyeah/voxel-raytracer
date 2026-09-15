@@ -5,4 +5,4 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 
-float sampleTerrainHeight(const glm::vec2& position, const glm::uvec3& voxelDimensions);
+float sampleTerrainHeight(const glm::vec2& position, uint32_t worldHeight);

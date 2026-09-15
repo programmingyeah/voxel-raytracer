@@ -10,9 +10,11 @@
 #include <glm/glm.hpp>
 
 class VoxelWorld;
+enum class WorldLod : uint8_t;
 
 std::vector<uint32_t> findBestUngeneratedChunkWindowIndices(
     const VoxelWorld& world,
+    WorldLod lod,
     glm::ivec2 focusChunkXZ,
     glm::vec3 viewForward,
     size_t maxCount

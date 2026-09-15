@@ -5,6 +5,7 @@
 #include <vector>
 
 class VoxelWorld;
+enum class WorldLod : uint8_t;
 
 struct GpuBufferCopyRegion {
     size_t srcWordOffset = 0;
@@ -35,6 +36,6 @@ struct GpuWorldDiff {
     }
 };
 
-GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world);
-GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world);
-void clearGpuUploadDirtyState(VoxelWorld& world);
+GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world, WorldLod lod);
+GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world, WorldLod lod);
+void clearGpuUploadDirtyState(VoxelWorld& world, WorldLod lod);

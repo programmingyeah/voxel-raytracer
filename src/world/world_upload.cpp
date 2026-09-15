@@ -133,17 +133,18 @@ std::vector<std::pair<size_t, size_t>> buildDirtySpans(const std::vector<uint8_t
 }
 }
 
-GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world) {
+GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world, WorldLod lod) {
     GpuVoxelBuffers gpuBuffers;
 
-    gpuBuffers.chunkWindowIndices = world.window;
-    gpuBuffers.chunkBrickMaps.resize(world.slots.size() * PACKED_CHUNK_WORD_COUNT);
-    for (size_t chunkSlotIndex = 0; chunkSlotIndex < world.slots.size(); chunkSlotIndex++) {
+    const auto& storage = world.storage(lod);
+    gpuBuffers.chunkWindowIndices = storage.window;
+    gpuBuffers.chunkBrickMaps.resize(storage.slots.size() * PACKED_CHUNK_WORD_COUNT);
+    for (size_t chunkSlotIndex = 0; chunkSlotIndex < storage.slots.size(); chunkSlotIndex++) {
         packChunkRecord(
             gpuBuffers.chunkBrickMaps,
             chunkSlotIndex,
-            world.slots[chunkSlotIndex].chunk.getBrickMap(),
-            world.isChunkSlotGenerated(chunkSlotIndex)
+            storage.slots[chunkSlotIndex].chunk.getBrickMap(),
+            world.isChunkSlotGenerated(lod, chunkSlotIndex)
         );
     }
 
@@ -155,27 +156,28 @@ GpuVoxelBuffers buildGpuVoxelBuffers(const VoxelWorld& world) {
     return gpuBuffers;
 }
 
-GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
-    std::lock_guard<std::mutex> dirtyLock(world.dirtyStateMutex);
+GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world, WorldLod lod) {
+    auto& storage = world.storage(lod);
+    std::lock_guard<std::mutex> dirtyLock(storage.dirtyStateMutex);
 
     GpuWorldDiff worldDiff{};
-    worldDiff.chunkWindowIndices.totalWordCount = world.window.size();
-    worldDiff.chunkBrickMaps.totalWordCount = world.slots.size() * PACKED_CHUNK_WORD_COUNT;
+    worldDiff.chunkWindowIndices.totalWordCount = storage.window.size();
+    worldDiff.chunkBrickMaps.totalWordCount = storage.slots.size() * PACKED_CHUNK_WORD_COUNT;
 
-    for (const auto& span : buildDirtySpans(world.dirty.window)) {
+    for (const auto& span : buildDirtySpans(storage.dirty.window)) {
         const size_t spanStartIndex = span.first;
         const size_t spanIndexCount = span.second;
         const size_t srcWordOffset = worldDiff.chunkWindowIndices.data.size();
 
         worldDiff.chunkWindowIndices.data.insert(
             worldDiff.chunkWindowIndices.data.end(),
-            world.window.begin() + static_cast<std::ptrdiff_t>(spanStartIndex),
-            world.window.begin() + static_cast<std::ptrdiff_t>(spanStartIndex + spanIndexCount)
+            storage.window.begin() + static_cast<std::ptrdiff_t>(spanStartIndex),
+            storage.window.begin() + static_cast<std::ptrdiff_t>(spanStartIndex + spanIndexCount)
         );
         worldDiff.chunkWindowIndices.regions.push_back({srcWordOffset, spanStartIndex, spanIndexCount});
     }
 
-    for (const auto& span : buildDirtySpans(world.dirty.brickMaps)) {
+    for (const auto& span : buildDirtySpans(storage.dirty.brickMaps)) {
         const size_t spanStartChunk = span.first;
         const size_t spanChunkCount = span.second;
         const size_t dstWordOffset = spanStartChunk * PACKED_CHUNK_WORD_COUNT;
@@ -190,21 +192,22 @@ GpuWorldDiff buildGpuWorldDiff(VoxelWorld& world) {
             packChunkRecord(
                 worldDiff.chunkBrickMaps.data,
                 srcWordOffset / PACKED_CHUNK_WORD_COUNT + chunkOffset,
-                world.slots[chunkSlotIndex].chunk.getBrickMap(),
-                world.isChunkSlotGenerated(chunkSlotIndex)
+                storage.slots[chunkSlotIndex].chunk.getBrickMap(),
+                world.isChunkSlotGenerated(lod, chunkSlotIndex)
             );
         }
     }
 
-    clearDirtyFlags(world.dirty.window);
-    clearDirtyFlags(world.dirty.brickMaps);
-    clearDirtyFlags(world.dirty.brickPool);
+    clearDirtyFlags(storage.dirty.window);
+    clearDirtyFlags(storage.dirty.brickMaps);
+    clearDirtyFlags(storage.dirty.brickPool);
     return worldDiff;
 }
 
-void clearGpuUploadDirtyState(VoxelWorld& world) {
-    std::lock_guard<std::mutex> dirtyLock(world.dirtyStateMutex);
-    clearDirtyFlags(world.dirty.window);
-    clearDirtyFlags(world.dirty.brickMaps);
-    clearDirtyFlags(world.dirty.brickPool);
+void clearGpuUploadDirtyState(VoxelWorld& world, WorldLod lod) {
+    auto& storage = world.storage(lod);
+    std::lock_guard<std::mutex> dirtyLock(storage.dirtyStateMutex);
+    clearDirtyFlags(storage.dirty.window);
+    clearDirtyFlags(storage.dirty.brickMaps);
+    clearDirtyFlags(storage.dirty.brickPool);
 }

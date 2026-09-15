@@ -11,6 +11,7 @@
 #include <vector>
 
 struct WorldGenerationStats {
+    WorldLod lod = WorldLod::Lod0;
     uint64_t solidVoxelCount = 0;
     double totalGenerationMs = 0.0;
     double averageChunkGenerationMs = 0.0;
@@ -25,11 +26,11 @@ public:
     WorldGenerator(WorldGenerator&&) = delete;
     WorldGenerator& operator=(WorldGenerator&&) = delete;
 
-    void requestNextChunk(VoxelWorld& world, glm::ivec2 focusChunkXZ, glm::vec3 viewForward);
+    void requestNextChunk(VoxelWorld& world, glm::vec3 cameraPosition, glm::vec3 viewForward);
     std::optional<WorldGenerationStats> consumeCompletedGeneration();
 
 private:
-    struct GenerationJob { VoxelWorld* world = nullptr; uint32_t chunkSlotIndex = 0; glm::uvec3 voxelDimensions{}; };
+    struct GenerationJob { VoxelWorld* world = nullptr; WorldLod lod = WorldLod::Lod0; uint32_t chunkSlotIndex = 0; uint32_t terrainWorldHeight = 0; };
 
     void workerMain();
 

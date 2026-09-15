@@ -3,6 +3,7 @@
 #include "renderer_shared.hpp"
 #include "../world/gpu_world_layout.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 void VulkanApp::createComputeImages() {
@@ -35,45 +36,88 @@ void VulkanApp::createWorldBuffers() {
         throw std::runtime_error("voxel world must be set before creating world buffers");
     }
 
-    const GpuVoxelBuffers gpuBuffers = buildGpuVoxelBuffers(*world);
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        createWorldBuffersForLod(static_cast<WorldLod>(lodIndex));
+    }
+
+    syncWorldMetadata();
+}
+
+void VulkanApp::syncWorldMetadata() {
+    if (world == nullptr) {
+        throw std::runtime_error("voxel world must be set before syncing world metadata");
+    }
+
+    GpuWorldMetadata metadata{};
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        const WorldLod lod = static_cast<WorldLod>(lodIndex);
+        GpuLodMetadata& lodMetadata = metadata.lods.at(lodIndex);
+        lodMetadata.worldMin = glm::ivec4(world->getVoxelMin(lod), 0);
+        lodMetadata.worldMax = glm::ivec4(world->getVoxelMax(lod), 0);
+        lodMetadata.chunkWindowDimensions = glm::ivec4(world->getChunkCounts(lod), 0);
+        lodMetadata.traversalInfo = glm::ivec4(
+            static_cast<int32_t>(world->getChunkWorldSpan(lod)),
+            static_cast<int32_t>(world->getLocalCellWorldStep(lod)),
+            0,
+            0
+        );
+    }
+
+    if (worldMetadataBuffer.buffer == VK_NULL_HANDLE) {
+        worldMetadataBuffer.createBuffer(
+            &instance,
+            static_cast<VkDeviceSize>(sizeof(GpuWorldMetadata)),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+    }
+
+    std::vector<uint32_t> packed(sizeof(GpuWorldMetadata) / sizeof(uint32_t));
+    std::memcpy(packed.data(), &metadata, sizeof(GpuWorldMetadata));
+    uploadBufferWithStaging(instance, commandPool, worldMetadataBuffer, packed);
+}
+
+void VulkanApp::createWorldBuffersForLod(WorldLod lod) {
+    const GpuVoxelBuffers gpuBuffers = buildGpuVoxelBuffers(*world, lod);
     const VkDeviceSize chunkWindowIndexBufferSize = storageBufferSize(gpuBuffers.chunkWindowIndices);
     const VkDeviceSize chunkBrickMapBufferSize = storageBufferSize(gpuBuffers.chunkBrickMaps);
-    brickResidency.initializeForWorld(*world);
+    GpuLodResources& gpuLod = gpuLods.at(static_cast<size_t>(lod));
+    gpuLod.brickResidency.initializeForWorld(*world, lod);
 
-    if (chunkWindowIndexBuffer.buffer != VK_NULL_HANDLE) {
-        chunkWindowIndexBuffer.cleanup(&instance);
+    if (gpuLod.chunkWindowIndexBuffer.buffer != VK_NULL_HANDLE) {
+        gpuLod.chunkWindowIndexBuffer.cleanup(&instance);
     }
-    if (chunkBrickMapBuffer.buffer != VK_NULL_HANDLE) {
-        chunkBrickMapBuffer.cleanup(&instance);
+    if (gpuLod.chunkBrickMapBuffer.buffer != VK_NULL_HANDLE) {
+        gpuLod.chunkBrickMapBuffer.cleanup(&instance);
     }
-    if (brickPoolBuffer.buffer != VK_NULL_HANDLE) {
-        brickPoolBuffer.cleanup(&instance);
+    if (gpuLod.brickPoolBuffer.buffer != VK_NULL_HANDLE) {
+        gpuLod.brickPoolBuffer.cleanup(&instance);
     }
-    brickResidency.destroyRequestBuffers(instance);
+    gpuLod.brickResidency.destroyRequestBuffers(instance);
 
-    chunkWindowIndexBuffer.createBuffer(
+    gpuLod.chunkWindowIndexBuffer.createBuffer(
         &instance,
         chunkWindowIndexBufferSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     );
-    chunkBrickMapBuffer.createBuffer(
+    gpuLod.chunkBrickMapBuffer.createBuffer(
         &instance,
         chunkBrickMapBufferSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     );
-    brickPoolBuffer.createBuffer(
+    gpuLod.brickPoolBuffer.createBuffer(
         &instance,
-        storageBufferSize(static_cast<size_t>(brickResidency.getGpuBrickCapacity()) * PACKED_BRICK_WORD_COUNT),
+        storageBufferSize(static_cast<size_t>(gpuLod.brickResidency.getGpuBrickCapacity()) * PACKED_BRICK_WORD_COUNT),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     );
-    brickResidency.createRequestBuffers(instance, MAX_FRAMES_IN_FLIGHT);
+    gpuLod.brickResidency.createRequestBuffers(instance, MAX_FRAMES_IN_FLIGHT);
 
-    uploadBufferWithStaging(instance, commandPool, chunkWindowIndexBuffer, gpuBuffers.chunkWindowIndices);
-    uploadBufferWithStaging(instance, commandPool, chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
-    clearGpuUploadDirtyState(*world);
+    uploadBufferWithStaging(instance, commandPool, gpuLod.chunkWindowIndexBuffer, gpuBuffers.chunkWindowIndices);
+    uploadBufferWithStaging(instance, commandPool, gpuLod.chunkBrickMapBuffer, gpuBuffers.chunkBrickMaps);
+    clearGpuUploadDirtyState(*world, lod);
 }
 
 void VulkanApp::syncWorld() {
@@ -81,19 +125,26 @@ void VulkanApp::syncWorld() {
         throw std::runtime_error("voxel world must be set before syncing world buffers");
     }
 
-    const GpuWorldDiff worldDiff = buildGpuWorldDiff(*world);
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        syncWorldForLod(static_cast<WorldLod>(lodIndex));
+    }
+
+    syncWorldMetadata();
+}
+
+void VulkanApp::syncWorldForLod(WorldLod lod) {
+    GpuLodResources& gpuLod = gpuLods.at(static_cast<size_t>(lod));
+    const GpuWorldDiff worldDiff = buildGpuWorldDiff(*world, lod);
     const VkDeviceSize requiredChunkWindowIndexBufferSize = storageBufferSize(worldDiff.chunkWindowIndices.totalWordCount);
     const VkDeviceSize requiredChunkBrickMapBufferSize = storageBufferSize(worldDiff.chunkBrickMaps.totalWordCount);
-    const VkDeviceSize requiredBrickPoolBufferSize = brickPoolBuffer.size;
 
-    if (requiredChunkWindowIndexBufferSize > chunkWindowIndexBuffer.size ||
-        requiredChunkBrickMapBufferSize > chunkBrickMapBuffer.size ||
-        requiredBrickPoolBufferSize > brickPoolBuffer.size) {
+    if (requiredChunkWindowIndexBufferSize > gpuLod.chunkWindowIndexBuffer.size ||
+        requiredChunkBrickMapBufferSize > gpuLod.chunkBrickMapBuffer.size) {
         vkDeviceWaitIdle(instance.device());
         for (size_t i = 0; i < frameUploads.size(); i++) {
             cleanupUploads(i);
         }
-        createWorldBuffers();
+        createWorldBuffersForLod(lod);
         createDescriptorSets(false);
         return;
     }
@@ -102,11 +153,11 @@ void VulkanApp::syncWorld() {
         return;
     }
 
-    brickResidency.rebuildTrackedState(*world, worldDiff.chunkBrickMaps.data, worldDiff.chunkBrickMaps.regions);
+    gpuLod.brickResidency.rebuildTrackedState(*world, lod, worldDiff.chunkBrickMaps.data, worldDiff.chunkBrickMaps.regions);
 
     VulkanAppFrameUploads& uploads = frameUploads.at(currentFrame);
-    queueBufferUpload(uploads, chunkWindowIndexBuffer, worldDiff.chunkWindowIndices.data, byteRegionsFromWordRegions(worldDiff.chunkWindowIndices.regions));
-    queueBufferUpload(uploads, chunkBrickMapBuffer, worldDiff.chunkBrickMaps.data, byteRegionsFromWordRegions(worldDiff.chunkBrickMaps.regions));
+    queueBufferUpload(uploads, gpuLod.chunkWindowIndexBuffer, worldDiff.chunkWindowIndices.data, byteRegionsFromWordRegions(worldDiff.chunkWindowIndices.regions));
+    queueBufferUpload(uploads, gpuLod.chunkBrickMapBuffer, worldDiff.chunkBrickMaps.data, byteRegionsFromWordRegions(worldDiff.chunkBrickMaps.regions));
 }
 
 void VulkanApp::recordUploads(VkCommandBuffer commandBuffer) {
@@ -173,12 +224,20 @@ void VulkanApp::queueBufferUpload(VulkanAppFrameUploads& uploads, Buffer& destin
 
 void VulkanApp::resetRequestBuffer(size_t frameIndex)
 {
-    brickResidency.resetRequestBuffer(frameIndex);
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        resetRequestBufferForLod(frameIndex, static_cast<WorldLod>(lodIndex));
+    }
 }
 
-void VulkanApp::ensureGpuBrickCapacity(uint32_t requiredCapacity)
+void VulkanApp::resetRequestBufferForLod(size_t frameIndex, WorldLod lod)
 {
-    brickResidency.ensureGpuBrickCapacity(instance, commandPool, brickPoolBuffer, requiredCapacity, *this);
+    gpuLods.at(static_cast<size_t>(lod)).brickResidency.resetRequestBuffer(frameIndex);
+}
+
+void VulkanApp::ensureGpuBrickCapacity(WorldLod lod, uint32_t requiredCapacity)
+{
+    GpuLodResources& gpuLod = gpuLods.at(static_cast<size_t>(lod));
+    gpuLod.brickResidency.ensureGpuBrickCapacity(instance, commandPool, gpuLod.brickPoolBuffer, requiredCapacity, *this);
 }
 
 void VulkanApp::processBrickRequests(size_t frameIndex)
@@ -187,13 +246,22 @@ void VulkanApp::processBrickRequests(size_t frameIndex)
         return;
     }
 
-    brickResidency.processBrickRequests(
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        processBrickRequestsForLod(frameIndex, static_cast<WorldLod>(lodIndex));
+    }
+}
+
+void VulkanApp::processBrickRequestsForLod(size_t frameIndex, WorldLod lod)
+{
+    GpuLodResources& gpuLod = gpuLods.at(static_cast<size_t>(lod));
+    gpuLod.brickResidency.processBrickRequests(
         frameIndex,
+        lod,
         *world,
         instance,
         commandPool,
-        brickPoolBuffer,
-        chunkBrickMapBuffer,
+        gpuLod.brickPoolBuffer,
+        gpuLod.chunkBrickMapBuffer,
         frameUploads.at(frameIndex),
         *this
     );
@@ -201,12 +269,23 @@ void VulkanApp::processBrickRequests(size_t frameIndex)
 
 void VulkanApp::createDescriptorSets(bool allocateSets) {
     std::vector<VkDescriptorImageInfo> imageInfos(MAX_FRAMES_IN_FLIGHT);
-    std::vector<VkDescriptorBufferInfo> chunkWindowIndexInfos(MAX_FRAMES_IN_FLIGHT);
-    std::vector<VkDescriptorBufferInfo> chunkBrickMapInfos(MAX_FRAMES_IN_FLIGHT);
-    std::vector<VkDescriptorBufferInfo> brickPoolInfos(MAX_FRAMES_IN_FLIGHT);
-    std::vector<VkDescriptorBufferInfo> brickRequestInfos(MAX_FRAMES_IN_FLIGHT);
+    std::vector<VkDescriptorBufferInfo> metadataInfos(MAX_FRAMES_IN_FLIGHT);
+    std::array<std::vector<VkDescriptorBufferInfo>, WORLD_LOD_COUNT> chunkWindowIndexInfos{};
+    std::array<std::vector<VkDescriptorBufferInfo>, WORLD_LOD_COUNT> chunkBrickMapInfos{};
+    std::array<std::vector<VkDescriptorBufferInfo>, WORLD_LOD_COUNT> brickPoolInfos{};
+    std::array<std::vector<VkDescriptorBufferInfo>, WORLD_LOD_COUNT> brickRequestInfos{};
     std::vector<std::vector<DescriptorWrite>> descriptorWrites(MAX_FRAMES_IN_FLIGHT);
-    auto& requestBuffers = brickResidency.getRequestBuffers();
+
+    for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+        chunkWindowIndexInfos.at(lodIndex).resize(MAX_FRAMES_IN_FLIGHT);
+        chunkBrickMapInfos.at(lodIndex).resize(MAX_FRAMES_IN_FLIGHT);
+        brickPoolInfos.at(lodIndex).resize(MAX_FRAMES_IN_FLIGHT);
+        brickRequestInfos.at(lodIndex).resize(MAX_FRAMES_IN_FLIGHT);
+    }
+
+    const auto bindingBaseForLod = [](size_t lodIndex) -> uint32_t {
+        return 2u + static_cast<uint32_t>(lodIndex) * 4u;
+    };
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         imageInfos[i].sampler = VK_NULL_HANDLE;
@@ -215,25 +294,36 @@ void VulkanApp::createDescriptorSets(bool allocateSets) {
 
         descriptorWrites[i].push_back({0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, nullptr, &imageInfos[i]});
 
-        chunkWindowIndexInfos[i].buffer = chunkWindowIndexBuffer.buffer;
-        chunkWindowIndexInfos[i].offset = 0;
-        chunkWindowIndexInfos[i].range = chunkWindowIndexBuffer.size;
-        descriptorWrites[i].push_back({1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &chunkWindowIndexInfos[i], nullptr});
+        metadataInfos.at(i).buffer = worldMetadataBuffer.buffer;
+        metadataInfos.at(i).offset = 0;
+        metadataInfos.at(i).range = worldMetadataBuffer.size;
+        descriptorWrites[i].push_back({1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &metadataInfos.at(i), nullptr});
 
-        chunkBrickMapInfos[i].buffer = chunkBrickMapBuffer.buffer;
-        chunkBrickMapInfos[i].offset = 0;
-        chunkBrickMapInfos[i].range = chunkBrickMapBuffer.size;
-        descriptorWrites[i].push_back({2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &chunkBrickMapInfos[i], nullptr});
+        for (size_t lodIndex = 0; lodIndex < WORLD_LOD_COUNT; lodIndex++) {
+            const auto& gpuLod = gpuLods.at(lodIndex);
+            const auto& requestBuffers = gpuLod.brickResidency.getRequestBuffers();
+            const uint32_t bindingBase = bindingBaseForLod(lodIndex);
 
-        brickPoolInfos[i].buffer = brickPoolBuffer.buffer;
-        brickPoolInfos[i].offset = 0;
-        brickPoolInfos[i].range = brickPoolBuffer.size;
-        descriptorWrites[i].push_back({3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &brickPoolInfos[i], nullptr});
+            chunkWindowIndexInfos.at(lodIndex).at(i).buffer = gpuLod.chunkWindowIndexBuffer.buffer;
+            chunkWindowIndexInfos.at(lodIndex).at(i).offset = 0;
+            chunkWindowIndexInfos.at(lodIndex).at(i).range = gpuLod.chunkWindowIndexBuffer.size;
+            descriptorWrites[i].push_back({bindingBase + 0u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &chunkWindowIndexInfos.at(lodIndex).at(i), nullptr});
 
-        brickRequestInfos[i].buffer = requestBuffers.at(i).buffer.buffer;
-        brickRequestInfos[i].offset = 0;
-        brickRequestInfos[i].range = requestBuffers.at(i).buffer.size;
-        descriptorWrites[i].push_back({4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &brickRequestInfos[i], nullptr});
+            chunkBrickMapInfos.at(lodIndex).at(i).buffer = gpuLod.chunkBrickMapBuffer.buffer;
+            chunkBrickMapInfos.at(lodIndex).at(i).offset = 0;
+            chunkBrickMapInfos.at(lodIndex).at(i).range = gpuLod.chunkBrickMapBuffer.size;
+            descriptorWrites[i].push_back({bindingBase + 1u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &chunkBrickMapInfos.at(lodIndex).at(i), nullptr});
+
+            brickPoolInfos.at(lodIndex).at(i).buffer = gpuLod.brickPoolBuffer.buffer;
+            brickPoolInfos.at(lodIndex).at(i).offset = 0;
+            brickPoolInfos.at(lodIndex).at(i).range = gpuLod.brickPoolBuffer.size;
+            descriptorWrites[i].push_back({bindingBase + 2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &brickPoolInfos.at(lodIndex).at(i), nullptr});
+
+            brickRequestInfos.at(lodIndex).at(i).buffer = requestBuffers.at(i).buffer.buffer;
+            brickRequestInfos.at(lodIndex).at(i).offset = 0;
+            brickRequestInfos.at(lodIndex).at(i).range = requestBuffers.at(i).buffer.size;
+            descriptorWrites[i].push_back({bindingBase + 3u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &brickRequestInfos.at(lodIndex).at(i), nullptr});
+        }
     }
 
     if (allocateSets) {

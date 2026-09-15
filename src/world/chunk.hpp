@@ -21,8 +21,9 @@ using BrickPoolDirtyCallback = std::function<void(uint32_t)>;
 #include <glm/glm.hpp>
 
 class VoxelWorld;
+enum class WorldLod : uint8_t;
 struct TerrainBuildResult;
-void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions, TerrainBuildResult& outResult);
+void buildTerrainChunk(VoxelWorld& world, WorldLod lod, uint32_t chunkSlotIndex, uint32_t terrainWorldHeight, TerrainBuildResult& outResult);
 
 inline constexpr uint32_t BRICK_MAP_EMPTY = std::numeric_limits<uint32_t>::max();
 inline constexpr uint32_t PACKED_BRICK_MAP_ENTRY_WORD_COUNT = 2u;
@@ -62,7 +63,7 @@ public:
 
 private:
     friend class VoxelWorld;
-    friend void buildTerrainChunk(VoxelWorld& world, uint32_t chunkSlotIndex, const glm::uvec3& voxelDimensions, TerrainBuildResult& outResult);
+    friend void buildTerrainChunk(VoxelWorld& world, WorldLod lod, uint32_t chunkSlotIndex, uint32_t terrainWorldHeight, TerrainBuildResult& outResult);
 
     void setChunkCoordinate(glm::ivec3 inChunkCoordinate) { chunkCoordinate = inChunkCoordinate; }
     EncodedBrickMap& accessBrickMapForGeneration() { return brickMap; }

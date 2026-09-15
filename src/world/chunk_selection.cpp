@@ -8,8 +8,6 @@
 
 namespace {
 constexpr float VIEW_ALIGNMENT_THRESHOLD = 0.35f;
-constexpr float SURFACE_PRIORITY_MARGIN = static_cast<float>(Chunk::SIZE);
-
 enum class ChunkPriorityBucket : uint32_t {
     InViewNearSurface = 0,
     NearSurface = 1,
@@ -54,30 +52,35 @@ float viewAlignmentToChunkXZ(const glm::vec2& normalizedViewXZ, int64_t deltaX, 
 }
 
 ChunkSelectionScore scoreChunkSelection(
+    const VoxelWorld& world,
+    WorldLod lod,
     const glm::ivec3& chunkCoordinate,
     glm::ivec2 focusChunkXZ,
     glm::vec2 normalizedViewXZ,
-    const glm::uvec3& voxelDimensions
+    uint32_t terrainWorldHeight
 ) {
     const int64_t deltaX = static_cast<int64_t>(chunkCoordinate.x) - focusChunkXZ.x;
     const int64_t deltaZ = static_cast<int64_t>(chunkCoordinate.z) - focusChunkXZ.y;
     const int64_t distanceSquared = deltaX * deltaX + deltaZ * deltaZ;
     const float alignment = viewAlignmentToChunkXZ(normalizedViewXZ, deltaX, deltaZ);
     const bool isInView = alignment >= VIEW_ALIGNMENT_THRESHOLD;
+    const float chunkWorldSpan = static_cast<float>(world.getChunkWorldSpan(lod));
+    const float surfacePriorityMargin = chunkWorldSpan;
+    const glm::ivec3 chunkWorldMin = world.getChunkWorldMin(lod, chunkCoordinate);
 
     const float surfaceHeight = sampleTerrainHeight(
         glm::vec2(
-            (static_cast<float>(chunkCoordinate.x) + 0.5f) * static_cast<float>(Chunk::SIZE),
-            (static_cast<float>(chunkCoordinate.z) + 0.5f) * static_cast<float>(Chunk::SIZE)
+            static_cast<float>(chunkWorldMin.x) + 0.5f * chunkWorldSpan,
+            static_cast<float>(chunkWorldMin.z) + 0.5f * chunkWorldSpan
         ),
-        voxelDimensions
+        terrainWorldHeight
     );
-    const float chunkMinWorldY = static_cast<float>(chunkCoordinate.y * static_cast<int32_t>(Chunk::SIZE));
-    const float chunkMaxWorldY = chunkMinWorldY + static_cast<float>(Chunk::SIZE - 1u);
+    const float chunkMinWorldY = static_cast<float>(chunkWorldMin.y);
+    const float chunkMaxWorldY = chunkMinWorldY + chunkWorldSpan - 1.0f;
     const bool isNearSurface =
-        surfaceHeight >= chunkMinWorldY - SURFACE_PRIORITY_MARGIN &&
-        surfaceHeight <= chunkMaxWorldY + SURFACE_PRIORITY_MARGIN;
-    const bool isUnderground = surfaceHeight > chunkMaxWorldY + SURFACE_PRIORITY_MARGIN;
+        surfaceHeight >= chunkMinWorldY - surfacePriorityMargin &&
+        surfaceHeight <= chunkMaxWorldY + surfacePriorityMargin;
+    const bool isUnderground = surfaceHeight > chunkMaxWorldY + surfacePriorityMargin;
 
     const ChunkPriorityBucket bucket =
         isInView && isNearSurface ? ChunkPriorityBucket::InViewNearSurface :
@@ -104,6 +107,7 @@ bool isChunkSelectionScoreBetter(const ChunkSelectionScore& candidate, const Chu
 
 std::vector<uint32_t> findBestUngeneratedChunkWindowIndices(
     const VoxelWorld& world,
+    WorldLod lod,
     glm::ivec2 focusChunkXZ,
     glm::vec3 viewForward,
     size_t maxCount
@@ -116,19 +120,21 @@ std::vector<uint32_t> findBestUngeneratedChunkWindowIndices(
     bestSelections.reserve(maxCount);
 
     const glm::vec2 normalizedViewXZ = normalizedViewDirectionXZ(viewForward);
-    const glm::uvec3 voxelDimensions = world.getVoxelDimensions();
+    const uint32_t terrainWorldHeight = world.getTerrainWorldHeight();
 
-    for (size_t localWindowIndex = 0; localWindowIndex < world.getChunkCount(); localWindowIndex++) {
-        if (world.getChunkStateByWindowIndex(localWindowIndex) != ChunkRuntimeState::Ungenerated) {
+    for (size_t localWindowIndex = 0; localWindowIndex < world.getChunkCount(lod); localWindowIndex++) {
+        if (world.getChunkStateByWindowIndex(lod, localWindowIndex) != ChunkRuntimeState::Ungenerated) {
             continue;
         }
 
-        const glm::ivec3 chunkCoordinate = world.getChunkByWindowIndex(localWindowIndex).getChunkCoordinate();
+        const glm::ivec3 chunkCoordinate = world.getChunkByWindowIndex(lod, localWindowIndex).getChunkCoordinate();
         const ChunkSelectionScore candidateScore = scoreChunkSelection(
+            world,
+            lod,
             chunkCoordinate,
             focusChunkXZ,
             normalizedViewXZ,
-            voxelDimensions
+            terrainWorldHeight
         );
 
         if (bestSelections.size() == maxCount &&

@@ -142,15 +142,21 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
     const VkExtent2D extent = swapchain.getSwapExtent();
     const float verticalFovRadians = glm::radians(70.0f);
     const float focalScale = 1.0f / std::tan(verticalFovRadians * 0.5f);
+    float maxTraceDistance = 2048.0f;
+    if (world != nullptr) {
+        const WorldLod coarsestLod = static_cast<WorldLod>(WORLD_LOD_COUNT - 1u);
+        const glm::vec3 worldMin = glm::vec3(world->getVoxelMin(coarsestLod));
+        const glm::vec3 worldMax = glm::vec3(world->getVoxelMax(coarsestLod));
+        maxTraceDistance = glm::length(worldMax - worldMin);
+    }
+
     ComputePushConstants pushConstants{};
     pushConstants.cameraPos = glm::vec4(camera.getPosition(), 0.0f);
     pushConstants.cameraForward = glm::vec4(camera.getForward(), 0.0f);
     pushConstants.cameraRight = glm::vec4(camera.getRight(), 0.0f);
     pushConstants.cameraUp = glm::vec4(camera.getUp(), 0.0f);
-    pushConstants.worldMin = glm::ivec4(world->getVoxelMin(), 0);
-    pushConstants.worldMax = glm::ivec4(world->getVoxelMax(), 0);
-    pushConstants.chunkWindowDimensions = glm::ivec4(world->getChunkCounts(), 0);
-    pushConstants.renderParams = glm::vec4(rayQueryVisualizationIntensity, 2048.0f, focalScale, static_cast<float>(rayQueryVisualizationMode));
+    pushConstants.visualizationParams = glm::vec4(rayQueryVisualizationIntensity, maxTraceDistance, focalScale, 0.0f);
+    pushConstants.renderModeParams = glm::ivec4(rayQueryVisualizationMode, lodRenderMode, 0, 0);
 
     vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePushConstants), &pushConstants);
     vkCmdDispatch(commandBuffer, (extent.width + 7u) / 8u, (extent.height + 7u) / 8u, 1u);
@@ -304,10 +310,13 @@ void VulkanApp::cleanup() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
 
-    brickResidency.destroyRequestBuffers(instance);
-    chunkWindowIndexBuffer.cleanup(&instance);
-    chunkBrickMapBuffer.cleanup(&instance);
-    brickPoolBuffer.cleanup(&instance);
+    for (auto& gpuLod : gpuLods) {
+        gpuLod.brickResidency.destroyRequestBuffers(instance);
+        gpuLod.chunkWindowIndexBuffer.cleanup(&instance);
+        gpuLod.chunkBrickMapBuffer.cleanup(&instance);
+        gpuLod.brickPoolBuffer.cleanup(&instance);
+    }
+    worldMetadataBuffer.cleanup(&instance);
     descriptorManager.cleanup(&instance);
     syncManager.cleanup(&instance);
     commandPool.cleanup(&instance);

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 class VoxelWorld;
@@ -26,10 +27,10 @@ public:
         uint32_t* mappedWords = nullptr;
     };
 
-    void initializeForWorld(const VoxelWorld& world);
+    void initializeForWorld(const VoxelWorld& world, WorldLod lod);
     void createRequestBuffers(Instance& instance, size_t frameCount);
     void destroyRequestBuffers(Instance& instance);
-    void rebuildTrackedState(VoxelWorld& world, const std::vector<uint32_t>& chunkBrickMapWords, const std::vector<struct GpuBufferCopyRegion>& regions);
+    void rebuildTrackedState(VoxelWorld& world, WorldLod lod, const std::vector<uint32_t>& chunkBrickMapWords, const std::vector<struct GpuBufferCopyRegion>& regions);
     void resetRequestBuffer(size_t frameIndex);
     void ensureGpuBrickCapacity(
         Instance& instance,
@@ -40,6 +41,7 @@ public:
     );
     void processBrickRequests(
         size_t frameIndex,
+        WorldLod lod,
         VoxelWorld& world,
         Instance& instance,
         CommandPool& commandPool,
@@ -55,8 +57,10 @@ public:
     uint32_t getNextGpuBrickSlot() const { return nextGpuBrickSlot; }
     uint32_t getLastBrickRequestCount() const { return lastBrickRequestCount; }
     uint32_t getLastDroppedBrickRequestCount() const { return lastDroppedBrickRequestCount; }
+    WorldLod getLod() const { return lod; }
 
 private:
+    WorldLod lod{};
     std::vector<RequestBuffer> requestBuffers;
     std::vector<uint32_t> gpuSlotByChunkEntry;
     std::vector<uint64_t> requestedChunkEntryBits;
