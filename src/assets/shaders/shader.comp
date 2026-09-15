@@ -1021,7 +1021,7 @@ TraceResult traceSceneForLodInterval(LodTraceContext ctx, vec3 ro, vec3 rd, floa
     result.intersectsCoverage = true;
     result.coverageStartT = startT;
     result.coverageEndT = endT;
-    result.exitedThroughTop = rd.y > 0.0 && abs(endT - worldExitT) <= EPS && worldExitT <= maxTraceT + EPS && worldEntryNormal.y <= 0.0;
+    result.exitedThroughTop = rd.y > 0.2 && abs(endT - worldExitT) <= EPS && worldExitT <= maxTraceT + EPS && worldEntryNormal.y <= 0.0;
 
     vec3 inv = vec3(abs(rd.x) > 1e-6 ? 1.0 / rd.x : BIG, abs(rd.y) > 1e-6 ? 1.0 / rd.y : BIG, abs(rd.z) > 1e-6 ? 1.0 / rd.z : BIG);
     ivec3 step = ivec3(rd.x > 0.0 ? 1 : -1, rd.y > 0.0 ? 1 : -1, rd.z > 0.0 ? 1 : -1);

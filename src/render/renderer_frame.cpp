@@ -147,7 +147,7 @@ void VulkanApp::recordComputeCommand(VkCommandBuffer commandBuffer, uint32_t ima
         const WorldLod coarsestLod = static_cast<WorldLod>(WORLD_LOD_COUNT - 1u);
         const glm::vec3 worldMin = glm::vec3(world->getVoxelMin(coarsestLod));
         const glm::vec3 worldMax = glm::vec3(world->getVoxelMax(coarsestLod));
-        maxTraceDistance = glm::length(worldMax - worldMin);
+        maxTraceDistance = glm::length(worldMax - worldMin) * 2.0f;
     }
 
     ComputePushConstants pushConstants{};
